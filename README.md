@@ -131,16 +131,6 @@ CI runs the same checks on macOS with the pinned toolchains. The `Dockerfile`
 provides a Linux correctness environment; do not mix Docker measurements with
 native host measurements.
 
-## Repository layout
-
-```text
-benchmark/    SQL corpora and workload manifests
-dremel-cpp/   C++26 engine
-dremel-rs/    Rust engine
-docs/         Supported SQL surface
-scripts/      Dataset, validation, and benchmark tooling
-```
-
 The project is intentionally single-machine and in-memory. Distributed
 exchange, durable spill/recovery, transactions, and database wire protocols
 are outside its current scope.
