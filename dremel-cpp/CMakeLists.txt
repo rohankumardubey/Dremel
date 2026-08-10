@@ -5,10 +5,26 @@ set(CMAKE_CXX_STANDARD ${DREMEL_CXX_STANDARD})
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Threads REQUIRED)
-add_executable(dremel-cpp src/main.cpp)
+
+set(DREMEL_ENGINE_HEADERS
+    src/app/cli.hpp
+    src/core/types.hpp
+    src/execution/aggregate.hpp
+    src/execution/evaluator.hpp
+    src/execution/relational.hpp
+    src/execution/scalar.hpp
+    src/nested/levels.hpp
+    src/optimizer/optimizer.hpp
+    src/server/protocol.hpp
+    src/server/scheduler.hpp
+    src/sql/parser.hpp
+    src/storage/catalog.hpp
+    src/tests/self_test.hpp)
+
+add_executable(dremel-cpp src/main.cpp ${DREMEL_ENGINE_HEADERS})
 target_compile_options(dremel-cpp PRIVATE $<$<CONFIG:Release>:-O3> $<$<CONFIG:Release>:-DNDEBUG>)
 target_link_libraries(dremel-cpp PRIVATE Threads::Threads)
-add_executable(dremel-cpp-tests src/main.cpp)
+add_executable(dremel-cpp-tests src/main.cpp ${DREMEL_ENGINE_HEADERS})
 target_compile_options(dremel-cpp-tests PRIVATE -UNDEBUG)
 target_link_libraries(dremel-cpp-tests PRIVATE Threads::Threads)
 enable_testing()

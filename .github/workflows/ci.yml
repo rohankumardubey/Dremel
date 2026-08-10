@@ -27,7 +27,7 @@ jobs:
           ctest --test-dir dremel-cpp/build --output-on-failure
       - name: Cross-engine smoke benchmark
         env:
-          DATASET_ROWS: 10000
+          DATASET_ROWS: 20000
           WARMUP: 0
           ITERATIONS: 1
         run: ./benchmark.sh
