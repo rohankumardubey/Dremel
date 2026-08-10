@@ -3,6 +3,7 @@ data
 results
 dremel-rs/target
 dremel-cpp/build
+.venv
 __pycache__
 *.py[cod]
 .DS_Store

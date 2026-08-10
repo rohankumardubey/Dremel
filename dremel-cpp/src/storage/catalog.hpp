@@ -4,6 +4,10 @@
 
 namespace dremel {
 
+struct Table;
+static std::shared_ptr<Table> load_arrow_ipc(const std::string &path);
+static std::shared_ptr<Table> load_parquet(const std::string &path);
+
 struct Dictionary {
   std::vector<std::string> values;
   std::unordered_map<std::string, std::uint32_t> ids;
@@ -76,7 +80,13 @@ struct Table {
     return bound;
   }
   static std::shared_ptr<Table> load(const std::string &path) {
-    return path.ends_with(".dremel") ? load_binary(path) : load_csv(path);
+    if (path.ends_with(".dremel"))
+      return load_binary(path);
+    if (path.ends_with(".arrow"))
+      return load_arrow_ipc(path);
+    if (path.ends_with(".parquet"))
+      return load_parquet(path);
+    return load_csv(path);
   }
   static std::shared_ptr<Table> load_binary(const std::string &path) {
     std::ifstream in(path, std::ios::binary);
@@ -260,6 +270,8 @@ struct CampaignsTable {
   std::vector<std::int64_t> budget;
   std::unordered_map<std::int64_t, std::vector<std::size_t>> index;
 };
+static UsersTable load_users_interoperable(const std::string &path);
+static CampaignsTable load_campaigns_interoperable(const std::string &path);
 struct Catalog {
   std::shared_ptr<Table> events;
   UsersTable users;
@@ -270,6 +282,18 @@ struct Catalog {
     Catalog catalog;
     catalog.events = std::move(events);
     const auto directory = std::filesystem::path(events_path).parent_path();
+    if (events_path.ends_with(".arrow") || events_path.ends_with(".parquet")) {
+      const auto event_name =
+          std::filesystem::path(events_path).filename().string();
+      auto companion = [&](const std::string &table) {
+        auto name = event_name;
+        name.replace(0, std::string("events").size(), table);
+        return (directory / name).string();
+      };
+      catalog.users = load_users_interoperable(companion("users"));
+      catalog.campaigns = load_campaigns_interoperable(companion("campaigns"));
+      return catalog;
+    }
     auto fields = [](const std::string &line) {
       std::vector<std::string> result;
       std::size_t start = 0;

@@ -1,0 +1,44 @@
+[
+  {
+    "query_id": "S001",
+    "category": "full_scan_aggregate",
+    "file": "../queries/Q001.sql",
+    "description": "Full scan count"
+  },
+  {
+    "query_id": "S002",
+    "category": "filtered_scan",
+    "file": "../queries/Q016.sql",
+    "description": "Dictionary predicate"
+  },
+  {
+    "query_id": "S003",
+    "category": "single_group_by",
+    "file": "../queries/Q032.sql",
+    "description": "Dictionary group"
+  },
+  {
+    "query_id": "S004",
+    "category": "aggregate_heavy",
+    "file": "../queries/Q048.sql",
+    "description": "Wide aggregate"
+  },
+  {
+    "query_id": "S005",
+    "category": "order_by_limit",
+    "file": "../queries/Q064.sql",
+    "description": "Ordered grouped result"
+  },
+  {
+    "query_id": "S006",
+    "category": "nullable_aggregates",
+    "file": "../extended/queries/E015.sql",
+    "description": "Nullable Parquet column"
+  },
+  {
+    "query_id": "S007",
+    "category": "dimension_join",
+    "file": "../sql-v1/queries/S019.sql",
+    "description": "Official-format events and users join"
+  }
+]

@@ -19,16 +19,30 @@ EXTENDED="${EXTENDED:-1}"
 SQL_V1="${SQL_V1:-1}"
 OPTIMIZER="${OPTIMIZER:-1}"
 CONCURRENCY="${CONCURRENCY:-1}"
+STORAGE="${STORAGE:-1}"
 export LTO NATIVE BENCH_CPUSET CPP_STANDARD
 
+if [[ -n "${PYTHON_BIN:-}" ]]; then
+  PYTHON="$PYTHON_BIN"
+elif [[ -x .venv/bin/python ]]; then
+  PYTHON=".venv/bin/python"
+else
+  python3 -m venv .venv
+  PYTHON=".venv/bin/python"
+fi
+if ! "$PYTHON" -c 'import pyarrow; assert pyarrow.__version__ == "25.0.1"' 2>/dev/null; then
+  "$PYTHON" -m pip install -r requirements.txt
+fi
+
 mkdir -p results
-python3 scripts/create_workload.py
-python3 scripts/create_extended_workload.py
-python3 scripts/create_sql_v1_workload.py
-python3 scripts/create_optimizer_workload.py
-python3 scripts/create_concurrency_workload.py
-python3 scripts/generate_data.py --rows "$DATASET_ROWS" --seed "$DATASET_SEED"
-python3 scripts/build_column_store.py
+"$PYTHON" scripts/create_workload.py
+"$PYTHON" scripts/create_extended_workload.py
+"$PYTHON" scripts/create_sql_v1_workload.py
+"$PYTHON" scripts/create_optimizer_workload.py
+"$PYTHON" scripts/create_concurrency_workload.py
+"$PYTHON" scripts/generate_data.py --rows "$DATASET_ROWS" --seed "$DATASET_SEED"
+"$PYTHON" scripts/build_column_store.py
+"$PYTHON" scripts/build_interoperable_data.py
 
 echo "Rust toolchain: $(rustc --version)"
 echo "Cargo: $(cargo --version)"
@@ -85,35 +99,58 @@ cargo fmt --manifest-path dremel-rs/Cargo.toml --check
 cargo test --manifest-path dremel-rs/Cargo.toml
 cargo clippy --manifest-path dremel-rs/Cargo.toml --all-targets --all-features -- -D warnings
 
+CMAKE_PREFIX_ARGS=()
+if command -v brew >/dev/null 2>&1 && brew --prefix apache-arrow >/dev/null 2>&1; then
+  CMAKE_PREFIX_ARGS+=("-DCMAKE_PREFIX_PATH=$(brew --prefix apache-arrow)")
+fi
 cmake --fresh -S dremel-cpp -B dremel-cpp/build -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CXX_COMPILER="$CXX_BIN" -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG $CXX_FLAGS" \
-  -DCMAKE_INTERPROCEDURAL_OPTIMIZATION="$CXX_LTO" -DDREMEL_CXX_STANDARD="$CPP_STANDARD"
+  -DCMAKE_INTERPROCEDURAL_OPTIMIZATION="$CXX_LTO" -DDREMEL_CXX_STANDARD="$CPP_STANDARD" \
+  "${CMAKE_PREFIX_ARGS[@]}"
 cmake --build dremel-cpp/build -j
 ctest --test-dir dremel-cpp/build --output-on-failure
-python3 scripts/differential_test.py
-python3 scripts/test_resource_limits.py
+"$PYTHON" scripts/differential_test.py
+"$PYTHON" scripts/test_resource_limits.py
 
-python3 scripts/run_benchmark.py --data data/events.dremel --threads "$BENCH_THREADS" --batch-size "$BATCH_SIZE" \
+"$PYTHON" scripts/run_benchmark.py --data data/events.dremel --threads "$BENCH_THREADS" --batch-size "$BATCH_SIZE" \
   --warmup "$WARMUP" --iterations "$ITERATIONS" --tie-threshold "$TIE_THRESHOLD_PCT"
 
 if [[ "$EXTENDED" == 1 ]]; then
-  python3 scripts/run_benchmark.py --data data/events.dremel --threads "$BENCH_THREADS" --batch-size "$BATCH_SIZE" \
+  "$PYTHON" scripts/run_benchmark.py --data data/events.dremel --threads "$BENCH_THREADS" --batch-size "$BATCH_SIZE" \
     --warmup "$WARMUP" --iterations "$ITERATIONS" --tie-threshold "$TIE_THRESHOLD_PCT" \
     --manifest benchmark/extended/manifest.json --results-dir results/extended
 fi
 
 if [[ "$SQL_V1" == 1 ]]; then
-  python3 scripts/run_benchmark.py --data data/events.dremel --threads "$BENCH_THREADS" --batch-size "$BATCH_SIZE" \
+  "$PYTHON" scripts/run_benchmark.py --data data/events.dremel --threads "$BENCH_THREADS" --batch-size "$BATCH_SIZE" \
     --warmup "$WARMUP" --iterations "$ITERATIONS" --tie-threshold "$TIE_THRESHOLD_PCT" \
     --manifest benchmark/sql-v1/manifest.json --results-dir results/sql-v1
 fi
 
 if [[ "$OPTIMIZER" == 1 ]]; then
-  python3 scripts/run_optimizer_benchmark.py --data data/events.dremel --threads "$BENCH_THREADS" \
+  "$PYTHON" scripts/run_optimizer_benchmark.py --data data/events.dremel --threads "$BENCH_THREADS" \
     --batch-size "$BATCH_SIZE" --warmup "$WARMUP" --iterations "$ITERATIONS"
 fi
 
 if [[ "$CONCURRENCY" == 1 ]]; then
-  python3 scripts/run_concurrency_benchmark.py --data data/events.dremel --threads "$BENCH_THREADS" \
+  "$PYTHON" scripts/run_concurrency_benchmark.py --data data/events.dremel --threads "$BENCH_THREADS" \
     --batch-size "$BATCH_SIZE"
+fi
+
+if [[ "$STORAGE" == 1 ]]; then
+  for storage_case in \
+    "dremcol1:data/events.dremel" \
+    "arrow-ipc:data/events.arrow" \
+    "parquet-snappy:data/events-snappy.parquet" \
+    "parquet-zstd:data/events-zstd.parquet"; do
+    storage_name="${storage_case%%:*}"
+    storage_file="${storage_case#*:}"
+    "$PYTHON" scripts/run_benchmark.py --data "$storage_file" \
+      --threads "$BENCH_THREADS" --batch-size "$BATCH_SIZE" \
+      --warmup "$WARMUP" --iterations "$ITERATIONS" \
+      --tie-threshold "$TIE_THRESHOLD_PCT" \
+      --manifest benchmark/storage/manifest.json \
+      --results-dir "results/storage/$storage_name"
+  done
+  "$PYTHON" scripts/summarize_storage_benchmark.py
 fi

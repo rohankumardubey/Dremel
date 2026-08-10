@@ -4,5 +4,6 @@ dremel-rs/target/
 dremel-cpp/build/
 __pycache__/
 .ruff_cache/
+.venv/
 *.py[cod]
 .DS_Store

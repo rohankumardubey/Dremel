@@ -20,6 +20,35 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def dataset_details(path: str, metadata: dict) -> dict[str, object]:
+    source = Path(path)
+    if source.suffix == ".dremel":
+        expected = metadata.get("column_store_sha256")
+        name = "DREMCOL1"
+    elif source.suffix == ".csv":
+        expected = metadata.get("csv_sha256")
+        name = "CSV"
+    elif source.suffix in (".arrow", ".parquet"):
+        files = metadata.get("interoperable", {}).get("files", {})
+        expected = files.get(source.name, {}).get("sha256")
+        if source.suffix == ".arrow":
+            name = "Arrow IPC"
+        else:
+            compression = source.stem.rsplit("-", 1)[-1].capitalize()
+            name = f"Parquet ({compression})"
+    else:
+        raise RuntimeError(f"unsupported dataset format: {source.suffix}")
+    if not expected:
+        raise RuntimeError(f"no metadata hash for {source.name}")
+    return {
+        "path": str(source),
+        "file": source.name,
+        "format": name,
+        "bytes": source.stat().st_size,
+        "sha256": expected,
+    }
+
+
 class Server:
     def __init__(
         self, name: str, command: list[str], env: dict[str, str] | None = None
@@ -275,6 +304,7 @@ def environment_text(cfg, metadata, rust, cpp, args, rust_rss, cpp_rss) -> str:
         "unknown",
     )
     cxx_path, cxx_version, cxx_stdlib = cxx_details()
+    dataset = dataset_details(args.data, metadata)
     fields = {
         "benchmark_date_utc": datetime.datetime.now(datetime.UTC).isoformat(),
         "os": uname.system,
@@ -300,12 +330,8 @@ def environment_text(cfg, metadata, rust, cpp, args, rust_rss, cpp_rss) -> str:
         "cmake": version(["cmake", "--version"]),
         "python": sys.version.splitlines()[0],
         "dataset_rows": metadata["row_count"],
-        "dataset_format": "DREMCOL1" if args.data.endswith(".dremel") else "CSV",
-        "dataset_sha256": (
-            metadata.get("column_store_sha256")
-            if args.data.endswith(".dremel")
-            else metadata["csv_sha256"]
-        ),
+        "dataset_format": dataset["format"],
+        "dataset_sha256": dataset["sha256"],
         "dataset_seed": metadata["seed"],
         "batch_size": cfg["batch_size"],
         "thread_count": cfg["threads"],
@@ -383,12 +409,9 @@ def main() -> int:
             (manifest_path.parent / item["file"]).read_text().strip().replace("\n", " ")
         )
     metadata = json.loads((ROOT / "data/metadata.json").read_text())
+    dataset = dataset_details(args.data, metadata)
     actual_sha = hashlib.sha256(Path(args.data).read_bytes()).hexdigest()
-    expected_sha = (
-        metadata.get("column_store_sha256")
-        if args.data.endswith(".dremel")
-        else metadata["csv_sha256"]
-    )
+    expected_sha = dataset["sha256"]
     if actual_sha != expected_sha:
         raise RuntimeError("dataset SHA-256 does not match metadata")
     cmd_tail = [
@@ -492,6 +515,7 @@ def main() -> int:
         common = {
             "configuration": cfg,
             "dataset": metadata,
+            "input": dataset,
             "warmup": args.warmup,
             "iterations": args.iterations,
             "queries": None,
@@ -543,6 +567,11 @@ def main() -> int:
         comparison_doc = {
             "configuration": cfg,
             "dataset": metadata,
+            "input": {
+                **dataset,
+                "rust_load_time_ms": rust.load_ns / 1e6,
+                "cpp_load_time_ms": cpp.load_ns / 1e6,
+            },
             "tie_threshold_pct": args.tie_threshold,
             "cpp_wins": wins["C++"],
             "rust_wins": wins["Rust"],
@@ -608,7 +637,7 @@ def main() -> int:
             "=" * 60,
             "",
             f"Dataset rows:         {metadata['row_count']:,}",
-            f"Dataset format:       {'DREMCOL1' if args.data.endswith('.dremel') else 'CSV'}",
+            f"Dataset format:       {dataset['format']}",
             f"Dataset hash:         {expected_sha}",
             f"Queries tested:       {query_count}",
             f"Queries correct:      {query_count} / {query_count}",

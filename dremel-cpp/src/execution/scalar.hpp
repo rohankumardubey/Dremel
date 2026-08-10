@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../storage/catalog.hpp"
+#include "../storage/interoperable.hpp"
 
 namespace dremel {
 

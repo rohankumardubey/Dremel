@@ -1,7 +1,7 @@
 # Dremel Bench
 
 Two small columnar SQL engines, one in Rust and one in C++, built to answer the
-same queries over the same bytes. The repository is a practical test bed for
+same queries over equivalent data. The repository is a practical test bed for
 query execution, optimization, and concurrent workload scheduling rather than
 a general-purpose database.
 
@@ -14,7 +14,7 @@ It is an independent implementation and is not Google Dremel or BigQuery.
 | Area | Implementation |
 | --- | --- |
 | Engines | Rust 1.97.1 (Rust 2024) and LLVM Clang 22.1.8 (C++26) |
-| Storage | Deterministic `DREMCOL1` column store with dictionary-encoded strings |
+| Storage | DREMCOL1, Apache Arrow IPC, and Apache Parquet with Snappy or Zstd |
 | Execution | Batched scans, selection vectors, partitioned aggregation, joins and windows |
 | Optimizer | Pushdown, pruning, constant folding, join selection/reordering, runtime filters and Top-K |
 | Workloads | 64 baseline, 16 hardening, 68 SQL, 8 optimizer and 5 concurrency cases |
@@ -32,6 +32,16 @@ Requirements:
 - Rust 1.97.1 with `rustfmt` and `clippy`
 - CMake 3.20 or newer
 - LLVM Clang 22 with C++26 support
+- Apache Arrow C++ and Parquet 25.0.1
+- PyArrow 25.0.1 from `requirements.txt`
+
+On macOS, install the native dependencies and Python package with:
+
+```bash
+brew install llvm cmake apache-arrow
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
 
 Run a small end-to-end check:
 
@@ -70,9 +80,11 @@ NATIVE=1 \
 ./benchmark.sh
 ```
 
-`EXTENDED`, `SQL_V1`, `OPTIMIZER`, and `CONCURRENCY` default to `1`. Set any of
-them to `0` to skip that suite. On Linux, `BENCH_CPUSET=0-7` pins both servers
-through `taskset`.
+`EXTENDED`, `SQL_V1`, `OPTIMIZER`, `CONCURRENCY`, and `STORAGE` default to `1`.
+Set any of them to `0` to skip that suite. The storage suite verifies equal
+typed results and benchmarks full-file load plus in-memory execution for
+DREMCOL1, Arrow IPC, Parquet Snappy, and Parquet Zstd. On Linux,
+`BENCH_CPUSET=0-7` pins both servers through `taskset`.
 
 ## Running an individual query
 
@@ -88,6 +100,18 @@ After a release build and dataset generation:
   --sql "SELECT country, COUNT(*) AS count FROM events GROUP BY country" \
   --explain
 ```
+
+Use an interoperable file by changing `--data` in either command:
+
+```bash
+--data data/events.arrow
+--data data/events-snappy.parquet
+--data data/events-zstd.parquet
+```
+
+`users` and `campaigns` are loaded from matching Arrow or Parquet files when a
+query uses those tables. The files are generated deterministically by official
+PyArrow and read through the official Rust and C++ Arrow/Parquet libraries.
 
 Use `--stats` for scan and execution counters. `--memory-limit-mb` and
 `--max-result-rows` enable resource admission limits. See
@@ -119,6 +143,7 @@ cargo test --manifest-path dremel-rs/Cargo.toml
 cargo clippy --manifest-path dremel-rs/Cargo.toml --all-targets --all-features -- -D warnings
 
 cmake -S dremel-cpp -B dremel-cpp/build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH="$(brew --prefix apache-arrow)" \
   -DDREMEL_CXX_STANDARD=26
 cmake --build dremel-cpp/build -j
 ctest --test-dir dremel-cpp/build --output-on-failure
@@ -131,6 +156,7 @@ CI runs the same checks on macOS with the pinned toolchains. The `Dockerfile`
 provides a Linux correctness environment; do not mix Docker measurements with
 native host measurements.
 
-The project is intentionally single-machine and in-memory. Distributed
-exchange, durable spill/recovery, transactions, and database wire protocols
-are outside its current scope.
+The current Arrow and Parquet path decodes the full file into the engine's
+in-memory columns. Row-group pruning and direct predicate pushdown are future
+work. Distributed exchange, durable spill/recovery, transactions, and database
+wire protocols are also outside the current scope.

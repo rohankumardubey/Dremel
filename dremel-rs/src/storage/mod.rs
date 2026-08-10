@@ -5,6 +5,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::sync::Arc;
 
+mod interoperable;
+
 #[derive(Default)]
 pub(crate) struct Dictionary {
     pub(crate) values: Vec<String>,
@@ -146,6 +148,19 @@ impl Catalog {
         let directory = Path::new(events_path)
             .parent()
             .unwrap_or_else(|| Path::new("."));
+        if events_path.ends_with(".arrow") || events_path.ends_with(".parquet") {
+            let event_name = Path::new(events_path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or("invalid events path")?;
+            let users_path = directory.join(event_name.replacen("events", "users", 1));
+            let campaigns_path = directory.join(event_name.replacen("events", "campaigns", 1));
+            return Ok(Self {
+                events,
+                users: interoperable::load_users(&users_path)?,
+                campaigns: interoperable::load_campaigns(&campaigns_path)?,
+            });
+        }
         let users_path = directory.join("users.csv");
         let campaigns_path = directory.join("campaigns.csv");
         let mut users = UsersTable::default();
@@ -689,6 +704,10 @@ impl Table {
     pub fn load(path: &str) -> Result<Self, String> {
         if path.ends_with(".dremel") {
             Self::load_binary(path)
+        } else if path.ends_with(".arrow") {
+            interoperable::load_arrow_ipc(path)
+        } else if path.ends_with(".parquet") {
+            interoperable::load_parquet(path)
         } else {
             Self::load_csv(path)
         }
