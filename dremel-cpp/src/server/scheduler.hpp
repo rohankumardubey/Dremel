@@ -133,6 +133,8 @@ public:
             request->changed.notify_all();
           }
           execution_control = request->control;
+          QueryMemoryScope memory_scope(
+              std::make_shared<QueryMemory>(request->memory_mb));
           Rows rows;
           std::string error;
           try {

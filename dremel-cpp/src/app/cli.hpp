@@ -31,6 +31,8 @@ inline int run_cli(int argc, char **argv) {
     const auto batch = std::stoull(arg(argc, argv, "--batch-size", "4096"));
     const auto memory_limit_mb =
         std::stoull(arg(argc, argv, "--memory-limit-mb", "0"));
+    const auto query_memory_limit_mb =
+        std::stoull(arg(argc, argv, "--query-memory-limit-mb", "0"));
     const auto max_result_rows =
         std::stoull(arg(argc, argv, "--max-result-rows", "0"));
     const auto max_active_queries =
@@ -67,6 +69,8 @@ inline int run_cli(int argc, char **argv) {
                     << *it << '\n';
       } else {
         const auto started = Clock::now();
+        auto memory = std::make_shared<QueryMemory>(query_memory_limit_mb);
+        QueryMemoryScope memory_scope(memory);
         auto rows = is_relational(q)
                         ? execute_rel(q, Catalog::load(path, table))
                         : execute(q, table, pool, threads, batch);
@@ -89,12 +93,18 @@ inline int run_cli(int argc, char **argv) {
                     << ",\"columns_scanned\":" << q.columns.size()
                     << ",\"worker_threads\":" << threads
                     << ",\"logical_partitions\":" << threads * 4
-                    << ",\"elapsed_ns\":" << elapsed_ns << "}\n";
+                    << ",\"elapsed_ns\":" << elapsed_ns
+                    << ",\"query_memory_limit_bytes\":"
+                    << memory->limit_bytes()
+                    << ",\"query_memory_accounted_bytes\":"
+                    << memory->accounted_bytes() << "}\n";
       }
       return 0;
     }
     if (command != "bench-server") {
-      std::cout << "dremel-cpp query|bench-server\n";
+      std::cout << "dremel-cpp query|bench-server --data PATH --threads N "
+                   "--batch-size N [--query-memory-limit-mb N] [--sql SQL] "
+                   "[--explain]\n";
       return 0;
     }
     std::unordered_map<std::string, Query> prepared;
@@ -115,32 +125,49 @@ inline int run_cli(int argc, char **argv) {
         prepared.insert_or_assign(p[1], std::move(query));
         std::cout << "OK\t" << p[1];
       } else if (p[0] == "EXEC") {
-        auto start = Clock::now();
-        const auto &query = prepared.at(p[1]);
-        if (is_relational(query) && !catalog)
-          catalog = std::make_shared<Catalog>(Catalog::load(path, table));
-        auto rows = is_relational(query)
-                        ? execute_rel(query, *catalog)
-                        : execute(query, table, pool, threads, batch);
-        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                      Clock::now() - start)
-                      .count();
-        std::cout << "RESULT\t" << ns << '\t' << rows.size() << '\t'
-                  << (p[2] == "1" ? rows_json(rows) : "[]");
+        try {
+          auto start = Clock::now();
+          auto memory = std::make_shared<QueryMemory>(query_memory_limit_mb);
+          QueryMemoryScope memory_scope(memory);
+          const auto &query = prepared.at(p[1]);
+          if (is_relational(query) && !catalog)
+            catalog = std::make_shared<Catalog>(Catalog::load(path, table));
+          auto rows = is_relational(query)
+                          ? execute_rel(query, *catalog)
+                          : execute(query, table, pool, threads, batch);
+          auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        Clock::now() - start)
+                        .count();
+          std::cout << "RESULT\t" << ns << '\t' << rows.size() << '\t'
+                    << (p[2] == "1" ? rows_json(rows) : "[]") << '\t'
+                    << memory->limit_bytes() << '\t'
+                    << memory->accounted_bytes();
+        } catch (const std::exception &error) {
+          std::cout << "ERROR\t" << error.what();
+        }
       } else if (p[0] == "E2E") {
-        auto start = Clock::now();
-        auto q = prepare(Parser(p[2]).parse(), *table);
-        if (q.ctes.empty())
-          (void)bind_query(q);
-        if (is_relational(q) && !catalog)
-          catalog = std::make_shared<Catalog>(Catalog::load(path, table));
-        auto rows = is_relational(q) ? execute_rel(q, *catalog)
-                                     : execute(q, table, pool, threads, batch);
-        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                      Clock::now() - start)
-                      .count();
-        std::cout << "RESULT\t" << ns << '\t' << rows.size() << '\t'
-                  << (p[3] == "1" ? rows_json(rows) : "[]");
+        try {
+          auto start = Clock::now();
+          auto memory = std::make_shared<QueryMemory>(query_memory_limit_mb);
+          QueryMemoryScope memory_scope(memory);
+          auto q = prepare(Parser(p[2]).parse(), *table);
+          if (q.ctes.empty())
+            (void)bind_query(q);
+          if (is_relational(q) && !catalog)
+            catalog = std::make_shared<Catalog>(Catalog::load(path, table));
+          auto rows = is_relational(q)
+                          ? execute_rel(q, *catalog)
+                          : execute(q, table, pool, threads, batch);
+          auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        Clock::now() - start)
+                        .count();
+          std::cout << "RESULT\t" << ns << '\t' << rows.size() << '\t'
+                    << (p[3] == "1" ? rows_json(rows) : "[]") << '\t'
+                    << memory->limit_bytes() << '\t'
+                    << memory->accounted_bytes();
+        } catch (const std::exception &error) {
+          std::cout << "ERROR\t" << error.what();
+        }
       } else if (p[0] == "EXPLAIN") {
         std::cout << "EXPLAIN\t" << strings_json(prepared.at(p[1]).physical);
       } else if (p[0] == "CONFIG_ASYNC") {

@@ -34,9 +34,10 @@ fn precedence() {
 #[test]
 fn group_table_resizes() {
     let s = vec![AggState::Count(0)];
-    let mut t = GroupTable::new();
+    let mut t = GroupTable::new().unwrap();
     for i in 0..1000 {
-        t.get_or_insert(GroupKey { v: [i, 0, 0], n: 1 }, &s);
+        t.get_or_insert(GroupKey { v: [i, 0, 0], n: 1 }, &s)
+            .unwrap();
     }
     assert_eq!(t.len, 1000);
 }
@@ -66,7 +67,7 @@ fn fixture() -> Arc<Table> {
 }
 fn run(sql: &str, table: Arc<Table>, threads: usize) -> Vec<Vec<Scalar>> {
     let query = prepare(Parser::new(sql).unwrap().parse().unwrap(), &table);
-    execute(&query, table, &Pool::new(threads), 2)
+    execute(&query, table, &Pool::new(threads), 2).expect("query executes")
 }
 #[test]
 fn execution_operators_and_parallel_equivalence() {

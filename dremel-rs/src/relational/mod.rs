@@ -12,6 +12,12 @@ pub(crate) fn base_relation_rows(table: &str, catalog: &Catalog) -> Vec<RelRow> 
         "campaigns" => (catalog.campaigns.campaign_id.len(), 2),
         _ => return Vec::new(),
     };
+    if !account_query_memory_or_stop(
+        rows.saturating_mul(std::mem::size_of::<RelRow>()),
+        "relation materialization",
+    ) {
+        return Vec::new();
+    }
     let mut output = Vec::with_capacity(rows);
     for index in 0..rows {
         if index % 4096 == 0 && execution_cancelled() {
@@ -120,6 +126,13 @@ pub(crate) fn apply_join(
 ) -> Vec<RelRow> {
     let right_rows = base_relation_rows(&join.table.name, catalog);
     if join.kind == JoinKind::Cross {
+        let count = left_rows.len().saturating_mul(right_rows.len());
+        if !account_query_memory_or_stop(
+            count.saturating_mul(std::mem::size_of::<RelRow>()),
+            "cross join output",
+        ) {
+            return Vec::new();
+        }
         return left_rows
             .into_iter()
             .flat_map(|left| {
@@ -133,6 +146,9 @@ pub(crate) fn apply_join(
     let on = join.on.as_ref().expect("non-cross join has ON");
     let equality = join_equality(on, &join.table.name, bindings);
     let mut output = Vec::new();
+    if !account_query_memory_or_stop(right_rows.len(), "join match bitmap") {
+        return Vec::new();
+    }
     let mut matched_right = vec![false; right_rows.len()];
     if let (true, Some((left_key, right_key))) = (optimizer_enabled, equality) {
         let Expr::Column(left_column) = left_key else {
@@ -150,6 +166,20 @@ pub(crate) fn apply_join(
             if let Some(key) =
                 scalar_hash_key(relation_scalar(catalog, right, &right_table, &right_column))
             {
+                if !hash.contains_key(&key)
+                    && !account_query_memory_or_stop(
+                        std::mem::size_of::<ScalarKey>() + 64,
+                        "hash join build table",
+                    )
+                {
+                    return Vec::new();
+                }
+                if !account_query_memory_or_stop(
+                    std::mem::size_of::<usize>(),
+                    "hash join build candidates",
+                ) {
+                    return Vec::new();
+                }
                 hash.entry(key).or_default().push(index);
             }
         }
@@ -165,6 +195,12 @@ pub(crate) fn apply_join(
                 for &index in candidates {
                     let combined = merge_rel_rows(left, right_rows[index]);
                     if eval_rel(on, catalog, combined, bindings).truthy() {
+                        if !account_query_memory_or_stop(
+                            std::mem::size_of::<RelRow>(),
+                            "join output",
+                        ) {
+                            return Vec::new();
+                        }
                         output.push(combined);
                         matched = true;
                         matched_right[index] = true;
@@ -172,6 +208,9 @@ pub(crate) fn apply_join(
                 }
             }
             if !matched && matches!(join.kind, JoinKind::Left | JoinKind::Full) {
+                if !account_query_memory_or_stop(std::mem::size_of::<RelRow>(), "join output") {
+                    return Vec::new();
+                }
                 output.push(left);
             }
         }
@@ -184,17 +223,30 @@ pub(crate) fn apply_join(
             for (index, &right) in right_rows.iter().enumerate() {
                 let combined = merge_rel_rows(left, right);
                 if eval_rel(on, catalog, combined, bindings).truthy() {
+                    if !account_query_memory_or_stop(std::mem::size_of::<RelRow>(), "join output") {
+                        return Vec::new();
+                    }
                     output.push(combined);
                     matched = true;
                     matched_right[index] = true;
                 }
             }
             if !matched && matches!(join.kind, JoinKind::Left | JoinKind::Full) {
+                if !account_query_memory_or_stop(std::mem::size_of::<RelRow>(), "join output") {
+                    return Vec::new();
+                }
                 output.push(left);
             }
         }
     }
     if matches!(join.kind, JoinKind::Right | JoinKind::Full) {
+        let unmatched = matched_right.iter().filter(|matched| !**matched).count();
+        if !account_query_memory_or_stop(
+            unmatched.saturating_mul(std::mem::size_of::<RelRow>()),
+            "join output",
+        ) {
+            return Vec::new();
+        }
         output.extend(
             right_rows
                 .into_iter()
@@ -499,6 +551,14 @@ pub(crate) fn compute_window(
     catalog: &Catalog,
     bindings: &std::collections::HashMap<String, String>,
 ) -> Vec<Scalar> {
+    if !account_query_memory_or_stop(
+        relation
+            .len()
+            .saturating_mul(std::mem::size_of::<Scalar>() + std::mem::size_of::<usize>() + 64),
+        "window partitions and values",
+    ) {
+        return Vec::new();
+    }
     let Expr::Window {
         name,
         args,
@@ -724,30 +784,57 @@ pub(crate) fn compare_output_rows(
             return ordering;
         }
     }
-    format!("{left:?}").cmp(&format!("{right:?}"))
+    let scalar_rank = |value: &Scalar| match value {
+        Scalar::Null => 0,
+        Scalar::Int(_) => 1,
+        Scalar::Decimal(_) => 2,
+        Scalar::Float(_) => 3,
+        Scalar::Bool(_) => 4,
+        Scalar::Str(_) => 5,
+    };
+    for (left, right) in left.iter().zip(right) {
+        let ordering = scalar_rank(left)
+            .cmp(&scalar_rank(right))
+            .then_with(|| cmp(left, right).unwrap_or(Ordering::Equal));
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    left.len().cmp(&right.len())
+}
+
+pub(crate) fn query_output_order(query: &Query) -> Vec<(usize, &OrderSpec)> {
+    query
+        .order_by
+        .iter()
+        .map(|spec| {
+            let index = query
+                .select
+                .iter()
+                .position(|item| {
+                    item.alias.as_ref() == Some(&spec.key)
+                        || matches!(&item.expr, Expr::Column(column) if column == &spec.key || column.rsplit('.').next() == Some(spec.key.as_str()))
+                })
+                .unwrap_or(0);
+            (index, spec)
+        })
+        .collect()
 }
 
 pub(crate) fn finalize_rows(query: &Query, rows: &mut Vec<Vec<Scalar>>) {
     if query.distinct {
+        if !account_query_memory_or_stop(
+            rows.iter().map(crate::execution::row_bytes).sum(),
+            "distinct set",
+        ) {
+            rows.clear();
+            return;
+        }
         let mut seen = std::collections::HashSet::new();
         rows.retain(|row| seen.insert(row.iter().map(scalar_group_key_ref).collect::<Vec<_>>()));
     }
     if !query.order_by.is_empty() {
-        let order: Vec<_> = query
-            .order_by
-            .iter()
-            .map(|spec| {
-                let index = query
-                    .select
-                    .iter()
-                    .position(|item| {
-                        item.alias.as_ref() == Some(&spec.key)
-                            || matches!(&item.expr, Expr::Column(column) if column == &spec.key || column.rsplit('.').next() == Some(spec.key.as_str()))
-                    })
-                    .unwrap_or(0);
-                (index, spec)
-            })
-            .collect();
+        let order = query_output_order(query);
         let top_k = query
             .optimizer_enabled
             .then_some(query.limit)
@@ -1004,6 +1091,15 @@ pub(crate) fn execute_materialized(
     if query.from.name != relation.name {
         return Err(format!("unknown CTE {}", query.from.name));
     }
+    if !account_query_memory_or_stop(
+        relation
+            .rows
+            .len()
+            .saturating_mul(std::mem::size_of::<usize>()),
+        "filter selection",
+    ) {
+        return Ok(Vec::new());
+    }
     let mut selected: Vec<_> = (0..relation.rows.len()).collect();
     if let Some(filter) = &query.filter {
         selected.retain(|&row| eval_materialized(filter, relation, row).truthy());
@@ -1026,7 +1122,7 @@ pub(crate) fn execute_materialized(
             groups.insert(Vec::new(), (0, templates.clone()));
         }
         for row in selected {
-            let key = query
+            let key: Vec<ScalarKey> = query
                 .group_by
                 .iter()
                 .map(|column| {
@@ -1037,6 +1133,18 @@ pub(crate) fn execute_materialized(
                     ))
                 })
                 .collect();
+            if !groups.contains_key(&key)
+                && !account_query_memory_or_stop(
+                    key.len().saturating_mul(std::mem::size_of::<ScalarKey>())
+                        + templates
+                            .len()
+                            .saturating_mul(std::mem::size_of::<AggState>())
+                        + 64,
+                    "materialized hash aggregation",
+                )
+            {
+                return Ok(Vec::new());
+            }
             let group = groups
                 .entry(key)
                 .or_insert_with(|| (row, templates.clone()));
@@ -1053,33 +1161,42 @@ pub(crate) fn execute_materialized(
             }) {
                 continue;
             }
-            rows.push(
-                query
-                    .select
-                    .iter()
-                    .map(|item| {
-                        eval_materialized_group(
-                            &item.expr,
-                            relation,
-                            row,
-                            &aggregate_expressions,
-                            &values,
-                        )
-                    })
-                    .collect(),
-            );
+            let output: Vec<_> = query
+                .select
+                .iter()
+                .map(|item| {
+                    eval_materialized_group(
+                        &item.expr,
+                        relation,
+                        row,
+                        &aggregate_expressions,
+                        &values,
+                    )
+                })
+                .collect();
+            if !account_query_memory_or_stop(
+                crate::execution::row_bytes(&output),
+                "result materialization",
+            ) {
+                return Ok(Vec::new());
+            }
+            rows.push(output);
         }
     } else {
-        rows = selected
-            .into_iter()
-            .map(|row| {
-                query
-                    .select
-                    .iter()
-                    .map(|item| eval_materialized(&item.expr, relation, row))
-                    .collect()
-            })
-            .collect();
+        for row in selected {
+            let output: Vec<_> = query
+                .select
+                .iter()
+                .map(|item| eval_materialized(&item.expr, relation, row))
+                .collect();
+            if !account_query_memory_or_stop(
+                crate::execution::row_bytes(&output),
+                "result materialization",
+            ) {
+                return Ok(Vec::new());
+            }
+            rows.push(output);
+        }
     }
     finalize_rows(query, &mut rows);
     Ok(rows)
@@ -1109,15 +1226,20 @@ pub(crate) fn execute_materialized_joins(
         if columns.is_empty() {
             return Err(format!("unknown table {}", table.name));
         }
-        let rows = base_relation_rows(&table.name, catalog)
-            .into_iter()
-            .map(|row| {
-                columns
-                    .iter()
-                    .map(|column| relation_scalar(catalog, row, &table.name, column))
-                    .collect()
-            })
-            .collect();
+        let mut rows = Vec::new();
+        for row in base_relation_rows(&table.name, catalog) {
+            let output: Vec<_> = columns
+                .iter()
+                .map(|column| relation_scalar(catalog, row, &table.name, column))
+                .collect();
+            if !account_query_memory_or_stop(
+                crate::execution::row_bytes(&output),
+                "materialized relation",
+            ) {
+                return Ok((columns, Vec::new()));
+            }
+            rows.push(output);
+        }
         Ok((columns, rows))
     };
     let (from_columns, mut rows) = materialize(&query.from)?;
@@ -1147,6 +1269,12 @@ pub(crate) fn execute_materialized_joins(
                         eval_materialized_values(on, &combined_columns, &combined).truthy()
                     });
                 if matches {
+                    if !account_query_memory_or_stop(
+                        crate::execution::row_bytes(&combined),
+                        "materialized join output",
+                    ) {
+                        return Ok(Some(Vec::new()));
+                    }
                     joined.push(combined);
                     matched = true;
                     matched_right[right_index] = true;
@@ -1155,6 +1283,12 @@ pub(crate) fn execute_materialized_joins(
             if !matched && matches!(join.kind, JoinKind::Left | JoinKind::Full) {
                 let mut combined = left;
                 combined.extend(std::iter::repeat_n(Scalar::Null, right_width));
+                if !account_query_memory_or_stop(
+                    crate::execution::row_bytes(&combined),
+                    "materialized join output",
+                ) {
+                    return Ok(Some(Vec::new()));
+                }
                 joined.push(combined);
             }
         }
@@ -1163,6 +1297,12 @@ pub(crate) fn execute_materialized_joins(
                 if !matched {
                     let mut combined = vec![Scalar::Null; left_width];
                     combined.extend(right.iter().cloned());
+                    if !account_query_memory_or_stop(
+                        crate::execution::row_bytes(&combined),
+                        "materialized join output",
+                    ) {
+                        return Ok(Some(Vec::new()));
+                    }
                     joined.push(combined);
                 }
             }
@@ -1224,6 +1364,9 @@ pub(crate) fn execute_rel_inner(
     }
     let bindings = bind_query(query)?;
     let mut relation = base_relation_rows(&query.from.name, catalog);
+    if execution_cancelled() {
+        return Ok(Vec::new());
+    }
     for join in &query.joins {
         relation = apply_join(relation, join, catalog, &bindings, query.optimizer_enabled);
         if execution_cancelled() {
@@ -1251,6 +1394,15 @@ pub(crate) fn execute_rel_inner(
         let templates: Vec<_> = aggregate_expressions.iter().map(aggregate_state).collect();
         let mut groups = std::collections::HashMap::<Vec<ScalarKey>, RelGroup>::new();
         if query.group_by.is_empty() {
+            if !account_query_memory_or_stop(
+                templates
+                    .len()
+                    .saturating_mul(std::mem::size_of::<AggState>())
+                    + 64,
+                "relational hash aggregation",
+            ) {
+                return Ok(Vec::new());
+            }
             groups.insert(
                 Vec::new(),
                 RelGroup {
@@ -1268,10 +1420,22 @@ pub(crate) fn execute_rel_inner(
             if execution_cancelled() {
                 break;
             }
-            let key = group_columns
+            let key: Vec<ScalarKey> = group_columns
                 .iter()
                 .map(|(table, column)| relation_group_key(catalog, row, table, column))
                 .collect();
+            if !groups.contains_key(&key)
+                && !account_query_memory_or_stop(
+                    key.len().saturating_mul(std::mem::size_of::<ScalarKey>())
+                        + templates
+                            .len()
+                            .saturating_mul(std::mem::size_of::<AggState>())
+                        + 64,
+                    "relational hash aggregation",
+                )
+            {
+                return Ok(Vec::new());
+            }
             let group = groups.entry(key).or_insert_with(|| RelGroup {
                 row,
                 states: templates.clone(),
@@ -1296,22 +1460,27 @@ pub(crate) fn execute_rel_inner(
             }) {
                 continue;
             }
-            rows.push(
-                query
-                    .select
-                    .iter()
-                    .map(|item| {
-                        eval_group_expr(
-                            &item.expr,
-                            catalog,
-                            group.row,
-                            &bindings,
-                            &aggregate_expressions,
-                            &aggregate_values,
-                        )
-                    })
-                    .collect(),
-            );
+            let output: Vec<_> = query
+                .select
+                .iter()
+                .map(|item| {
+                    eval_group_expr(
+                        &item.expr,
+                        catalog,
+                        group.row,
+                        &bindings,
+                        &aggregate_expressions,
+                        &aggregate_values,
+                    )
+                })
+                .collect();
+            if !account_query_memory_or_stop(
+                crate::execution::row_bytes(&output),
+                "result materialization",
+            ) {
+                return Ok(Vec::new());
+            }
+            rows.push(output);
         }
     } else if has_windows {
         let mut window_expressions = Vec::new();
@@ -1322,36 +1491,90 @@ pub(crate) fn execute_rel_inner(
             .iter()
             .map(|window| compute_window(window, &relation, catalog, &bindings))
             .collect();
-        rows = (0..relation.len())
-            .map(|row_index| {
-                query
-                    .select
-                    .iter()
-                    .map(|item| {
-                        eval_window_expr(
-                            &item.expr,
-                            row_index,
-                            &relation,
-                            catalog,
-                            &bindings,
-                            &window_expressions,
-                            &window_values,
-                        )
-                    })
-                    .collect()
-            })
-            .collect();
+        if execution_cancelled() {
+            return Ok(Vec::new());
+        }
+        for row_index in 0..relation.len() {
+            let output: Vec<_> = query
+                .select
+                .iter()
+                .map(|item| {
+                    eval_window_expr(
+                        &item.expr,
+                        row_index,
+                        &relation,
+                        catalog,
+                        &bindings,
+                        &window_expressions,
+                        &window_values,
+                    )
+                })
+                .collect();
+            if !account_query_memory_or_stop(
+                crate::execution::row_bytes(&output),
+                "window result materialization",
+            ) {
+                return Ok(Vec::new());
+            }
+            rows.push(output);
+        }
     } else {
-        rows = relation
-            .into_iter()
-            .map(|row| {
-                query
-                    .select
-                    .iter()
-                    .map(|item| eval_rel(&item.expr, catalog, row, &bindings))
-                    .collect()
-            })
-            .collect();
+        let top_k = query
+            .optimizer_enabled
+            .then_some(query.limit)
+            .flatten()
+            .filter(|_| !query.order_by.is_empty())
+            .map(|limit| limit.saturating_add(query.offset));
+        if let Some(top_k) = top_k {
+            account_query_memory(
+                top_k.saturating_add(1).saturating_mul(
+                    std::mem::size_of::<Vec<Scalar>>()
+                        + query
+                            .select
+                            .len()
+                            .saturating_mul(std::mem::size_of::<Scalar>() + 64),
+                ),
+                "top-k buffer",
+            )?;
+        }
+        let order = query_output_order(query);
+        let mut worst_top_k = None;
+        for row in relation {
+            let output: Vec<_> = query
+                .select
+                .iter()
+                .map(|item| eval_rel(&item.expr, catalog, row, &bindings))
+                .collect();
+            if let Some(top_k) = top_k {
+                if top_k == 0 {
+                    continue;
+                }
+                if rows.len() < top_k {
+                    rows.push(output);
+                    if rows.len() == top_k {
+                        worst_top_k = (0..rows.len()).max_by(|&left, &right| {
+                            compare_output_rows(&rows[left], &rows[right], &order)
+                        });
+                    }
+                } else {
+                    let worst = worst_top_k.expect("non-empty top-k");
+                    if compare_output_rows(&output, &rows[worst], &order) == Ordering::Less {
+                        rows[worst] = output;
+                        worst_top_k = (0..rows.len()).max_by(|&left, &right| {
+                            compare_output_rows(&rows[left], &rows[right], &order)
+                        });
+                    }
+                }
+            } else {
+                if !account_query_memory_or_stop(
+                    crate::execution::row_bytes(&output),
+                    "result materialization",
+                ) {
+                    return Ok(Vec::new());
+                }
+                rows.push(output);
+            }
+        }
     }
     finalize_rows(query, &mut rows);
     Ok(rows)

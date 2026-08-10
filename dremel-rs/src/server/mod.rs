@@ -192,9 +192,12 @@ impl AsyncScheduler {
                         request.changed.notify_all();
                     }
                     set_execution_control(Some(request.control.clone()));
+                    let previous_memory = current_query_memory();
+                    set_query_memory(Some(QueryMemory::new(request.memory_mb)));
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         execute_rel(&request.query, &worker_shared.catalog)
                     }));
+                    set_query_memory(previous_memory);
                     set_execution_control(None);
                     let elapsed = started.elapsed().as_nanos();
                     {
@@ -445,24 +448,31 @@ pub fn run_bench_server(o: Options) -> Result<(), String> {
             "EXEC" => {
                 let q = prepared.get(p[1]).ok_or("unknown query")?;
                 let now = Instant::now();
-                let rows = if is_relational(q) {
-                    if catalog.is_none() {
-                        catalog = Some(Arc::new(Catalog::load(&o.data, table.clone())?));
-                    }
-                    execute_rel(q, catalog.as_ref().expect("catalog loaded"))?
-                } else {
-                    execute(q, table.clone(), &pool, o.batch_size)
-                };
-                let ns = now.elapsed().as_nanos();
-                println!(
-                    "RESULT\t{ns}\t{}\t{}",
-                    rows.len(),
-                    if p.get(2) == Some(&"1") {
-                        rows_json(&rows)
+                let (rows, memory) = with_query_memory(o.query_memory_limit_mb, || {
+                    if is_relational(q) {
+                        if catalog.is_none() {
+                            catalog = Some(Arc::new(Catalog::load(&o.data, table.clone())?));
+                        }
+                        execute_rel(q, catalog.as_ref().expect("catalog loaded"))
                     } else {
-                        "[]".into()
+                        execute(q, table.clone(), &pool, o.batch_size)
                     }
-                )
+                });
+                let ns = now.elapsed().as_nanos();
+                match rows {
+                    Ok(rows) => println!(
+                        "RESULT\t{ns}\t{}\t{}\t{}\t{}",
+                        rows.len(),
+                        if p.get(2) == Some(&"1") {
+                            rows_json(&rows)
+                        } else {
+                            "[]".into()
+                        },
+                        memory.limit_bytes(),
+                        memory.accounted_bytes()
+                    ),
+                    Err(error) => println!("ERROR\t{}", error.replace(['\t', '\n'], " ")),
+                }
             }
             "E2E" => {
                 let now = Instant::now();
@@ -473,24 +483,31 @@ pub fn run_bench_server(o: Options) -> Result<(), String> {
                 if q.ctes.is_empty() {
                     bind_query(&q)?;
                 }
-                let rows = if is_relational(&q) {
-                    if catalog.is_none() {
-                        catalog = Some(Arc::new(Catalog::load(&o.data, table.clone())?));
-                    }
-                    execute_rel(&q, catalog.as_ref().expect("catalog loaded"))?
-                } else {
-                    execute(&q, table.clone(), &pool, o.batch_size)
-                };
-                let ns = now.elapsed().as_nanos();
-                println!(
-                    "RESULT\t{ns}\t{}\t{}",
-                    rows.len(),
-                    if p.get(3) == Some(&"1") {
-                        rows_json(&rows)
+                let (rows, memory) = with_query_memory(o.query_memory_limit_mb, || {
+                    if is_relational(&q) {
+                        if catalog.is_none() {
+                            catalog = Some(Arc::new(Catalog::load(&o.data, table.clone())?));
+                        }
+                        execute_rel(&q, catalog.as_ref().expect("catalog loaded"))
                     } else {
-                        "[]".into()
+                        execute(&q, table.clone(), &pool, o.batch_size)
                     }
-                )
+                });
+                let ns = now.elapsed().as_nanos();
+                match rows {
+                    Ok(rows) => println!(
+                        "RESULT\t{ns}\t{}\t{}\t{}\t{}",
+                        rows.len(),
+                        if p.get(3) == Some(&"1") {
+                            rows_json(&rows)
+                        } else {
+                            "[]".into()
+                        },
+                        memory.limit_bytes(),
+                        memory.accounted_bytes()
+                    ),
+                    Err(error) => println!("ERROR\t{}", error.replace(['\t', '\n'], " ")),
+                }
             }
             "EXPLAIN" => println!(
                 "EXPLAIN\t{}",

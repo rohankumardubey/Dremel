@@ -20,6 +20,8 @@ SQL_V1="${SQL_V1:-1}"
 OPTIMIZER="${OPTIMIZER:-1}"
 CONCURRENCY="${CONCURRENCY:-1}"
 STORAGE="${STORAGE:-1}"
+MEMORY_BOUNDED="${MEMORY_BOUNDED:-1}"
+QUERY_MEMORY_LIMIT_MB="${QUERY_MEMORY_LIMIT_MB:-256}"
 export LTO NATIVE BENCH_CPUSET CPP_STANDARD
 
 if [[ -n "${PYTHON_BIN:-}" ]]; then
@@ -111,6 +113,7 @@ cmake --build dremel-cpp/build -j
 ctest --test-dir dremel-cpp/build --output-on-failure
 "$PYTHON" scripts/differential_test.py
 "$PYTHON" scripts/test_resource_limits.py
+"$PYTHON" scripts/test_memory_limits.py
 
 "$PYTHON" scripts/run_benchmark.py --data data/events.dremel --threads "$BENCH_THREADS" --batch-size "$BATCH_SIZE" \
   --warmup "$WARMUP" --iterations "$ITERATIONS" --tie-threshold "$TIE_THRESHOLD_PCT"
@@ -153,4 +156,14 @@ if [[ "$STORAGE" == 1 ]]; then
       --results-dir "results/storage/$storage_name"
   done
   "$PYTHON" scripts/summarize_storage_benchmark.py
+fi
+
+if [[ "$MEMORY_BOUNDED" == 1 ]]; then
+  "$PYTHON" scripts/run_benchmark.py --data data/events.dremel \
+    --threads "$BENCH_THREADS" --batch-size "$BATCH_SIZE" \
+    --warmup "$WARMUP" --iterations "$ITERATIONS" \
+    --tie-threshold "$TIE_THRESHOLD_PCT" \
+    --query-memory-limit-mb "$QUERY_MEMORY_LIMIT_MB" \
+    --manifest benchmark/memory/manifest.json \
+    --results-dir results/memory
 fi

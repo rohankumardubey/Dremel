@@ -1,0 +1,44 @@
+[
+  {
+    "query_id": "M001",
+    "category": "bounded_scan_aggregate",
+    "file": "queries/M001.sql",
+    "description": "Constant-memory full scan aggregate"
+  },
+  {
+    "query_id": "M002",
+    "category": "bounded_low_cardinality_group",
+    "file": "queries/M002.sql",
+    "description": "Low-cardinality grouped aggregation"
+  },
+  {
+    "query_id": "M003",
+    "category": "bounded_high_cardinality_group",
+    "file": "queries/M003.sql",
+    "description": "Filtered high-cardinality grouped aggregation"
+  },
+  {
+    "query_id": "M004",
+    "category": "bounded_top_k",
+    "file": "queries/M004.sql",
+    "description": "Streaming top-k without full result materialization"
+  },
+  {
+    "query_id": "M005",
+    "category": "bounded_distinct",
+    "file": "queries/M005.sql",
+    "description": "Distinct set accounting"
+  },
+  {
+    "query_id": "M006",
+    "category": "bounded_hash_join",
+    "file": "queries/M006.sql",
+    "description": "Hash join build and output accounting"
+  },
+  {
+    "query_id": "M007",
+    "category": "bounded_window",
+    "file": "queries/M007.sql",
+    "description": "Window partition and result accounting"
+  }
+]

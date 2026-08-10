@@ -11,11 +11,28 @@ use crate::types::*;
 use std::sync::Arc;
 use std::time::Instant;
 
-pub(crate) fn execute(q: &Query, t: Arc<Table>, pool: &Pool, batch: usize) -> Vec<Vec<Scalar>> {
+pub(crate) fn row_bytes(row: &Vec<Scalar>) -> usize {
+    std::mem::size_of::<Vec<Scalar>>()
+        + row.capacity().saturating_mul(std::mem::size_of::<Scalar>())
+        + row
+            .iter()
+            .map(|value| match value {
+                Scalar::Str(text) => text.capacity(),
+                _ => 0,
+            })
+            .sum::<usize>()
+}
+
+pub(crate) fn execute(
+    q: &Query,
+    t: Arc<Table>,
+    pool: &Pool,
+    batch: usize,
+) -> Result<Vec<Vec<Scalar>>, String> {
     let aggregate = q.select.iter().any(|s| is_agg(&s.expr)) || !q.group_by.is_empty();
     let mut rows = Vec::new();
     if aggregate {
-        let groups = pool.aggregate(Arc::new(q.clone()), t.clone(), batch);
+        let groups = pool.aggregate(Arc::new(q.clone()), t.clone(), batch)?;
         for e in groups.into_entries() {
             let mut row = Vec::new();
             let mut ai = 0;
@@ -28,10 +45,34 @@ pub(crate) fn execute(q: &Query, t: Arc<Table>, pool: &Pool, batch: usize) -> Ve
                     row.push(t.key_scalar(c, e.k.v[ki]))
                 }
             }
+            account_query_memory(row_bytes(&row), "result materialization")?;
             rows.push(row)
         }
     } else {
+        account_query_memory(
+            batch.max(1).saturating_mul(std::mem::size_of::<usize>()),
+            "scan selection",
+        )?;
         let mut selection = Vec::with_capacity(batch.max(1));
+        let top_k = q
+            .optimizer_enabled
+            .then_some(q.limit)
+            .flatten()
+            .filter(|_| !q.order_by.is_empty())
+            .map(|limit| limit.saturating_add(q.offset));
+        if let Some(top_k) = top_k {
+            account_query_memory(
+                top_k.saturating_add(1).saturating_mul(
+                    std::mem::size_of::<Vec<Scalar>>()
+                        + q.select
+                            .len()
+                            .saturating_mul(std::mem::size_of::<Scalar>() + 64),
+                ),
+                "top-k buffer",
+            )?;
+        }
+        let order = crate::relational::query_output_order(q);
+        let mut worst_top_k = None;
         'outer: for bs in (0..t.len()).step_by(batch.max(1)) {
             selection.clear();
             for i in bs..(bs + batch).min(t.len()) {
@@ -40,12 +81,45 @@ pub(crate) fn execute(q: &Query, t: Arc<Table>, pool: &Pool, batch: usize) -> Ve
                 }
             }
             for &i in &selection {
-                rows.push(
-                    q.select
-                        .iter()
-                        .map(|x| eval(&x.expr, t.as_ref(), i))
-                        .collect(),
-                );
+                let row: Vec<_> = q
+                    .select
+                    .iter()
+                    .map(|x| eval(&x.expr, t.as_ref(), i))
+                    .collect();
+                if let Some(top_k) = top_k {
+                    if top_k == 0 {
+                        continue;
+                    }
+                    if rows.len() < top_k {
+                        rows.push(row);
+                        if rows.len() == top_k {
+                            worst_top_k = (0..rows.len()).max_by(|&left, &right| {
+                                crate::relational::compare_output_rows(
+                                    &rows[left],
+                                    &rows[right],
+                                    &order,
+                                )
+                            });
+                        }
+                    } else {
+                        let worst = worst_top_k.expect("non-empty top-k");
+                        if crate::relational::compare_output_rows(&row, &rows[worst], &order)
+                            == std::cmp::Ordering::Less
+                        {
+                            rows[worst] = row;
+                            worst_top_k = (0..rows.len()).max_by(|&left, &right| {
+                                crate::relational::compare_output_rows(
+                                    &rows[left],
+                                    &rows[right],
+                                    &order,
+                                )
+                            });
+                        }
+                    }
+                } else {
+                    account_query_memory(row_bytes(&row), "result materialization")?;
+                    rows.push(row);
+                }
                 if q.order_by.is_empty()
                     && !q.distinct
                     && q.limit
@@ -57,7 +131,7 @@ pub(crate) fn execute(q: &Query, t: Arc<Table>, pool: &Pool, batch: usize) -> Ve
         }
     }
     finalize_rows(q, &mut rows);
-    rows
+    Ok(rows)
 }
 pub(crate) fn rows_json(rows: &[Vec<Scalar>]) -> String {
     format!(
@@ -147,11 +221,14 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
     }
     let pool = Pool::new(o.threads);
     let started = Instant::now();
-    let rows = if is_relational(&q) {
-        execute_rel(&q, &Catalog::load(&o.data, t.clone())?)?
-    } else {
-        execute(&q, t.clone(), &pool, o.batch_size)
-    };
+    let (rows, query_memory) = with_query_memory(o.query_memory_limit_mb, || {
+        if is_relational(&q) {
+            execute_rel(&q, &Catalog::load(&o.data, t.clone())?)
+        } else {
+            execute(&q, t.clone(), &pool, o.batch_size)
+        }
+    });
+    let rows = rows?;
     let elapsed_ns = started.elapsed().as_nanos();
     for row in &rows {
         println!(
@@ -164,14 +241,16 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
     }
     if stats {
         eprintln!(
-            "{{\"rows_scanned\":{},\"rows_returned\":{},\"batches_scanned\":{},\"columns_scanned\":{},\"worker_threads\":{},\"logical_partitions\":{},\"elapsed_ns\":{}}}",
+            "{{\"rows_scanned\":{},\"rows_returned\":{},\"batches_scanned\":{},\"columns_scanned\":{},\"worker_threads\":{},\"logical_partitions\":{},\"elapsed_ns\":{},\"query_memory_limit_bytes\":{},\"query_memory_accounted_bytes\":{}}}",
             t.len(),
             rows.len(),
             t.len().div_ceil(o.batch_size),
             q.columns.len(),
             o.threads,
             o.threads * 4,
-            elapsed_ns
+            elapsed_ns,
+            query_memory.limit_bytes(),
+            query_memory.accounted_bytes()
         );
     }
     Ok(())

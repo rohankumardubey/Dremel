@@ -46,7 +46,7 @@ for query_id, category, sql in QUERIES:
     )
 manifest = {
     "version": 1,
-    "scheduler": {"max_active_queries": 4, "queue_capacity": 64, "memory_mb": 512},
+    "scheduler": {"max_active_queries": 4, "queue_capacity": 64, "memory_mb": 4096},
     "queries": items,
     "mix": {
         "request_count": 30,
@@ -56,7 +56,7 @@ manifest = {
         "short_deadline_every": 11,
         "short_deadline_ms": 1,
         "cancel_every": 13,
-        "reservation_mb": 4,
+        "reservation_mb": 128,
     },
 }
 (base / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

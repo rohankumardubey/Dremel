@@ -3,7 +3,7 @@
   "scheduler": {
     "max_active_queries": 4,
     "queue_capacity": 64,
-    "memory_mb": 512
+    "memory_mb": 4096
   },
   "queries": [
     {
@@ -60,6 +60,6 @@
     "short_deadline_every": 11,
     "short_deadline_ms": 1,
     "cancel_every": 13,
-    "reservation_mb": 4
+    "reservation_mb": 128
   }
 }

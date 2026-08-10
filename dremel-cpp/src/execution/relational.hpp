@@ -205,6 +205,10 @@ static std::vector<Scalar> compute_window(const ExprPtr &expression,
                                           const std::vector<RelRow> &relation,
                                           const Catalog &catalog,
                                           const Bindings &bindings) {
+  account_query_memory(
+      relation.size() *
+          (sizeof(Scalar) + sizeof(std::size_t) + 64),
+      "window partitions and values");
   std::vector<std::pair<std::string, std::string>> partition_columns;
   partition_columns.reserve(expression->partition_by.size());
   for (auto &name : expression->partition_by)
@@ -354,8 +358,58 @@ static Scalar eval_window_expr(const ExprPtr &expression, std::size_t row_index,
         expression->boolean);
   return std::monostate{};
 }
+using OutputOrder =
+    std::vector<std::pair<std::size_t, const OrderSpec *>>;
+static OutputOrder output_order(const Query &query) {
+  OutputOrder order;
+  for (auto &spec : query.order_by) {
+    std::size_t index = 0;
+    for (std::size_t i = 0; i < query.select.size(); ++i)
+      if (query.select[i].alias == std::optional<std::string>{spec.key} ||
+          (query.select[i].expr->kind == ExprKind::column &&
+           (query.select[i].expr->text == spec.key ||
+            base_name(query.select[i].expr->text) == spec.key))) {
+        index = i;
+        break;
+      }
+    order.emplace_back(index, &spec);
+  }
+  return order;
+}
+static bool query_row_less(const std::vector<Scalar> &left,
+                           const std::vector<Scalar> &right,
+                           const OutputOrder &order) {
+  for (auto [index, spec] : order) {
+    const bool left_null =
+        std::holds_alternative<std::monostate>(left[index]);
+    const bool right_null =
+        std::holds_alternative<std::monostate>(right[index]);
+    const bool nulls_first = spec->nulls_first.value_or(!spec->ascending);
+    int comparison = 0;
+    if (left_null != right_null)
+      comparison = left_null == nulls_first ? -1 : 1;
+    else if (!left_null) {
+      comparison = compare(left[index], right[index]);
+      if (!spec->ascending)
+        comparison = -comparison;
+    }
+    if (comparison != 0)
+      return comparison < 0;
+  }
+  for (std::size_t i = 0; i < std::min(left.size(), right.size()); ++i) {
+    if (left[i].index() != right[i].index())
+      return left[i].index() < right[i].index();
+    if (const auto secondary = compare(left[i], right[i]); secondary != 0)
+      return secondary < 0;
+  }
+  return left.size() < right.size();
+}
 static void finalize_rows(const Query &query, Rows &rows) {
   if (query.distinct) {
+    std::size_t distinct_bytes{};
+    for (const auto &row : rows)
+      distinct_bytes += row_bytes(row);
+    account_query_memory(distinct_bytes, "distinct set");
     std::unordered_set<std::string> seen;
     std::erase_if(rows, [&](const auto &row) {
       std::string key;
@@ -368,44 +422,9 @@ static void finalize_rows(const Query &query, Rows &rows) {
     });
   }
   if (!query.order_by.empty()) {
-    std::vector<std::pair<std::size_t, const OrderSpec *>> order;
-    for (auto &spec : query.order_by) {
-      std::size_t index = 0;
-      for (std::size_t i = 0; i < query.select.size(); ++i)
-        if (query.select[i].alias == std::optional<std::string>{spec.key} ||
-            (query.select[i].expr->kind == ExprKind::column &&
-             (query.select[i].expr->text == spec.key ||
-              base_name(query.select[i].expr->text) == spec.key))) {
-          index = i;
-          break;
-        }
-      order.emplace_back(index, &spec);
-    }
+    const auto order = output_order(query);
     const auto compare_rows = [&](const auto &left, const auto &right) {
-      for (auto [index, spec] : order) {
-        const bool left_null =
-            std::holds_alternative<std::monostate>(left[index]);
-        const bool right_null =
-            std::holds_alternative<std::monostate>(right[index]);
-        const bool nulls_first = spec->nulls_first.value_or(!spec->ascending);
-        int comparison = 0;
-        if (left_null != right_null)
-          comparison = left_null == nulls_first ? -1 : 1;
-        else if (!left_null) {
-          comparison = compare(left[index], right[index]);
-          if (!spec->ascending)
-            comparison = -comparison;
-        }
-        if (comparison != 0)
-          return comparison < 0;
-      }
-      for (std::size_t i = 0; i < std::min(left.size(), right.size()); ++i) {
-        if (left[i].index() != right[i].index())
-          return left[i].index() < right[i].index();
-        if (const auto secondary = compare(left[i], right[i]); secondary != 0)
-          return secondary < 0;
-      }
-      return left.size() < right.size();
+      return query_row_less(left, right, order);
     };
     const auto top_k =
         std::min(rows.size(), query.optimizer_enabled && query.limit
@@ -629,6 +648,8 @@ static Rows execute_materialized(const Query &query,
   if (query.from.name != relation.name)
     throw std::runtime_error("unknown CTE " + query.from.name);
   std::vector<std::size_t> selected;
+  account_query_memory(relation.rows.size() * sizeof(std::size_t),
+                       "filter selection");
   for (std::size_t row = 0; row < relation.rows.size(); ++row)
     if (!query.filter || truthy(eval_materialized(query.filter, relation, row)))
       selected.push_back(row);
@@ -647,8 +668,11 @@ static Rows execute_materialized(const Query &query,
       templates.push_back(aggregate_state(expression));
     std::unordered_map<std::string, std::pair<std::size_t, std::vector<Agg>>>
         groups;
-    if (query.group_by.empty())
+    if (query.group_by.empty()) {
+      account_query_memory(templates.size() * sizeof(Agg) + 64,
+                           "materialized hash aggregation");
       groups.emplace("", std::pair{std::size_t{0}, templates});
+    }
     for (auto row : selected) {
       std::string key;
       for (auto &column_name : query.group_by) {
@@ -659,8 +683,12 @@ static Rows execute_materialized(const Query &query,
         key += scalar_hash_key(eval_materialized(column, relation, row))
                    .value_or("n:");
       }
-      auto [iterator, inserted] =
-          groups.try_emplace(key, std::pair{row, templates});
+      if (!groups.contains(key))
+        account_query_memory(sizeof(std::size_t) + sizeof(std::vector<Agg>) +
+                                 key.size() + templates.size() * sizeof(Agg) +
+                                 64,
+                             "materialized hash aggregation");
+      auto [iterator, inserted] = groups.try_emplace(key, std::pair{row, templates});
       iterator->second.first = row;
       for (std::size_t index = 0; index < iterator->second.second.size();
            ++index)
@@ -680,6 +708,7 @@ static Rows execute_materialized(const Query &query,
       for (auto &item : query.select)
         output.push_back(eval_materialized_group(
             item.expr, relation, group.first, aggregate_expressions, values));
+      account_query_memory(row_bytes(output), "result materialization");
       rows.push_back(std::move(output));
     }
   } else {
@@ -687,6 +716,7 @@ static Rows execute_materialized(const Query &query,
       std::vector<Scalar> output;
       for (auto &item : query.select)
         output.push_back(eval_materialized(item.expr, relation, row));
+      account_query_memory(row_bytes(output), "result materialization");
       rows.push_back(std::move(output));
     }
   }
@@ -722,6 +752,7 @@ static std::optional<Rows> execute_materialized_joins(const Query &query,
       std::vector<Scalar> values;
       for (auto &column : columns)
         values.push_back(relation_scalar(catalog, row, table.name, column));
+      account_query_memory(row_bytes(values), "materialized relation");
       rows.push_back(std::move(values));
     }
     return std::pair{columns, std::move(rows)};
@@ -741,6 +772,7 @@ static std::optional<Rows> execute_materialized_joins(const Query &query,
     const auto left_width = columns.size();
     const auto right_width = right_columns.size();
     Rows joined;
+    account_query_memory(right_rows.size(), "join match bitmap");
     std::vector<bool> matched_right(right_rows.size());
     for (auto &left : rows) {
       bool matched = false;
@@ -754,6 +786,8 @@ static std::optional<Rows> execute_materialized_joins(const Query &query,
             (join.on && truthy(eval_materialized_values(
                             join.on, combined_columns, combined)));
         if (matches) {
+          account_query_memory(row_bytes(combined),
+                               "materialized join output");
           joined.push_back(std::move(combined));
           matched = true;
           matched_right[right_index] = true;
@@ -763,6 +797,7 @@ static std::optional<Rows> execute_materialized_joins(const Query &query,
           (join.kind == JoinKind::left || join.kind == JoinKind::full)) {
         auto combined = left;
         combined.resize(combined.size() + right_width, std::monostate{});
+        account_query_memory(row_bytes(combined), "materialized join output");
         joined.push_back(std::move(combined));
       }
     }
@@ -773,6 +808,8 @@ static std::optional<Rows> execute_materialized_joins(const Query &query,
           std::vector<Scalar> combined(left_width, std::monostate{});
           combined.insert(combined.end(), right_rows[right_index].begin(),
                           right_rows[right_index].end());
+          account_query_memory(row_bytes(combined),
+                               "materialized join output");
           joined.push_back(std::move(combined));
         }
     rows = std::move(joined);
@@ -810,6 +847,10 @@ static Rows execute_rel_inner(const Query &query, const Catalog &catalog,
     rows.insert(rows.end(), std::make_move_iterator(right_rows.begin()),
                 std::make_move_iterator(right_rows.end()));
     if (!query.union_all) {
+      std::size_t distinct_bytes{};
+      for (const auto &row : rows)
+        distinct_bytes += row_bytes(row);
+      account_query_memory(distinct_bytes, "distinct set");
       std::unordered_set<std::string> seen;
       std::erase_if(rows, [&](const auto &row) {
         std::string key;
@@ -853,8 +894,11 @@ static Rows execute_rel_inner(const Query &query, const Catalog &catalog,
     for (auto &expression : aggregate_expressions)
       templates.push_back(aggregate_state(expression));
     std::unordered_map<std::string, RelGroup> groups;
-    if (query.group_by.empty())
+    if (query.group_by.empty()) {
+      account_query_memory(templates.size() * sizeof(Agg) + 64,
+                           "relational hash aggregation");
       groups.emplace("", RelGroup{{}, templates});
+    }
     std::vector<std::pair<std::string, std::string>> group_columns;
     group_columns.reserve(query.group_by.size());
     for (auto &column : query.group_by)
@@ -869,6 +913,10 @@ static Rows execute_rel_inner(const Query &query, const Catalog &catalog,
           key.push_back('|');
         key += scalar_hash_key(value).value_or("n:");
       }
+      if (!groups.contains(key))
+        account_query_memory(sizeof(RelGroup) + key.size() +
+                                 templates.size() * sizeof(Agg) + 64,
+                             "relational hash aggregation");
       auto [iterator, inserted] =
           groups.try_emplace(key, RelGroup{row, templates});
       iterator->second.row = row;
@@ -891,6 +939,7 @@ static Rows execute_rel_inner(const Query &query, const Catalog &catalog,
         output.push_back(eval_group_expr(item.expr, catalog, group.row,
                                          bindings, aggregate_expressions,
                                          aggregate_values));
+      account_query_memory(row_bytes(output), "result materialization");
       rows.push_back(std::move(output));
     }
   } else if (has_windows) {
@@ -908,15 +957,53 @@ static Rows execute_rel_inner(const Query &query, const Catalog &catalog,
         output.push_back(eval_window_expr(item.expr, row_index, relation,
                                           catalog, bindings, window_expressions,
                                           window_values));
+      account_query_memory(row_bytes(output), "window result materialization");
       rows.push_back(std::move(output));
     }
   } else {
-    rows.reserve(relation.size());
+    const auto top_k =
+        query.optimizer_enabled && query.limit && !query.order_by.empty()
+            ? std::optional{*query.limit + query.offset}
+            : std::optional<std::size_t>{};
+    const auto order = output_order(query);
+    if (top_k)
+      account_query_memory(
+          (*top_k + 1) *
+              (sizeof(std::vector<Scalar>) +
+               query.select.size() * (sizeof(Scalar) + 64)),
+          "top-k buffer");
+    else
+      rows.reserve(relation.size());
+    std::optional<std::size_t> worst_top_k;
     for (auto &row : relation) {
       std::vector<Scalar> output;
       for (auto &item : query.select)
         output.push_back(eval_rel(item.expr, catalog, row, bindings));
-      rows.push_back(std::move(output));
+      if (top_k) {
+        if (!*top_k)
+          continue;
+        if (rows.size() < *top_k) {
+          rows.push_back(std::move(output));
+          if (rows.size() == *top_k)
+            worst_top_k = static_cast<std::size_t>(std::distance(
+                rows.begin(), std::max_element(
+                                  rows.begin(), rows.end(),
+                                  [&](const auto &left, const auto &right) {
+                                    return query_row_less(left, right, order);
+                                  })));
+        } else if (query_row_less(output, rows[*worst_top_k], order)) {
+          rows[*worst_top_k] = std::move(output);
+          worst_top_k = static_cast<std::size_t>(std::distance(
+              rows.begin(), std::max_element(
+                                rows.begin(), rows.end(),
+                                [&](const auto &left, const auto &right) {
+                                  return query_row_less(left, right, order);
+                                })));
+        }
+      } else {
+        account_query_memory(row_bytes(output), "result materialization");
+        rows.push_back(std::move(output));
+      }
     }
   }
   finalize_rows(query, rows);
@@ -1046,10 +1133,13 @@ static Rows execute(const Query &q, const std::shared_ptr<Table> &t,
   if (aggregate) {
     const auto parts = std::max<std::size_t>(1, threads) * 4;
     std::vector<std::future<GroupTable>> f;
+    const auto memory = query_memory;
     for (std::size_t p = 0; p < parts; ++p) {
       auto start = p * t->size() / parts, end = (p + 1) * t->size() / parts;
-      f.push_back(pool.submit(
-          [&, start, end] { return partition(q, *t, start, end, batch); }));
+      f.push_back(pool.submit([&, start, end, memory] {
+        QueryMemoryScope scope(memory);
+        return partition(q, *t, start, end, batch);
+      }));
     }
     auto init = states(q);
     GroupTable final;
@@ -1069,12 +1159,26 @@ static Rows execute(const Query &q, const std::shared_ptr<Table> &t,
               s.expr->text, e.key.v[std::distance(q.group_by.begin(), it)]));
         }
       }
+      account_query_memory(row_bytes(row), "result materialization");
       rows.push_back(std::move(row));
     }
   } else {
     bool done = false;
     std::vector<std::size_t> selection;
+    account_query_memory(std::max<std::size_t>(1, batch) * sizeof(std::size_t),
+                         "scan selection");
     selection.reserve(std::max<std::size_t>(1, batch));
+    const auto top_k = q.optimizer_enabled && q.limit && !q.order_by.empty()
+                           ? std::optional{*q.limit + q.offset}
+                           : std::optional<std::size_t>{};
+    const auto order = output_order(q);
+    if (top_k)
+      account_query_memory(
+          (*top_k + 1) *
+              (sizeof(std::vector<Scalar>) +
+               q.select.size() * (sizeof(Scalar) + 64)),
+          "top-k buffer");
+    std::optional<std::size_t> worst_top_k;
     for (std::size_t bs = 0; bs < t->size() && !done;
          bs += std::max<std::size_t>(1, batch)) {
       selection.clear();
@@ -1086,7 +1190,33 @@ static Rows execute(const Query &q, const std::shared_ptr<Table> &t,
         std::vector<Scalar> row;
         for (auto &s : q.select)
           row.push_back(eval(s.expr, *t, i));
-        rows.push_back(std::move(row));
+        if (top_k) {
+          if (!*top_k)
+            continue;
+          if (rows.size() < *top_k) {
+            rows.push_back(std::move(row));
+            if (rows.size() == *top_k)
+              worst_top_k = static_cast<std::size_t>(std::distance(
+                  rows.begin(), std::max_element(
+                                    rows.begin(), rows.end(),
+                                    [&](const auto &left, const auto &right) {
+                                      return query_row_less(left, right, order);
+                                    })));
+          } else {
+            if (query_row_less(row, rows[*worst_top_k], order)) {
+              rows[*worst_top_k] = std::move(row);
+              worst_top_k = static_cast<std::size_t>(std::distance(
+                  rows.begin(), std::max_element(
+                                    rows.begin(), rows.end(),
+                                    [&](const auto &left, const auto &right) {
+                                      return query_row_less(left, right, order);
+                                    })));
+            }
+          }
+        } else {
+          account_query_memory(row_bytes(row), "result materialization");
+          rows.push_back(std::move(row));
+        }
         if (q.order_by.empty() && !q.distinct && q.limit &&
             rows.size() >= *q.limit + q.offset) {
           done = true;

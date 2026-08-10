@@ -1,6 +1,7 @@
 #pragma once
 
 #include "evaluator.hpp"
+#include "memory.hpp"
 
 namespace dremel {
 
@@ -152,6 +153,7 @@ static std::vector<RelRow> base_relation_rows(const std::string &table,
                     : table == "campaigns"
                         ? catalog.campaigns.campaign_id.size()
                         : 0;
+  account_query_memory(size * sizeof(RelRow), "relation materialization");
   rows.reserve(size);
   for (std::size_t index = 0; index < size; ++index) {
     if (index % 4096 == 0 && execution_cancelled())
@@ -216,6 +218,13 @@ static std::vector<RelRow> apply_join(std::vector<RelRow> left_rows,
   auto right_rows = base_relation_rows(join.table.name, catalog);
   std::vector<RelRow> output;
   if (join.kind == JoinKind::cross) {
+    if (right_rows.size() &&
+        left_rows.size() >
+            std::numeric_limits<std::size_t>::max() / right_rows.size())
+      throw std::runtime_error(
+          "RESOURCE_EXHAUSTED cross join cardinality overflow");
+    account_query_memory(left_rows.size() * right_rows.size() * sizeof(RelRow),
+                         "cross join output");
     output.reserve(left_rows.size() * right_rows.size());
     for (auto &left : left_rows)
       for (auto &right : right_rows)
@@ -223,6 +232,7 @@ static std::vector<RelRow> apply_join(std::vector<RelRow> left_rows,
     return output;
   }
   auto equality = join_equality(join.on, join.table.name, bindings);
+  account_query_memory(right_rows.size(), "join match bitmap");
   std::vector<bool> matched_right(right_rows.size());
   if (optimizer_enabled && equality) {
     const auto [left_table, left_column] =
@@ -232,8 +242,14 @@ static std::vector<RelRow> apply_join(std::vector<RelRow> left_rows,
     std::unordered_map<std::string, std::vector<std::size_t>> hash;
     for (std::size_t index = 0; index < right_rows.size(); ++index)
       if (auto key = scalar_hash_key(relation_scalar(
-              catalog, right_rows[index], right_table, right_column)))
+              catalog, right_rows[index], right_table, right_column))) {
+        if (!hash.contains(*key))
+          account_query_memory(sizeof(std::string) + key->size() + 64,
+                               "hash join build table");
+        account_query_memory(sizeof(std::size_t),
+                             "hash join build candidates");
         hash[*key].push_back(index);
+      }
     for (auto &left : left_rows) {
       if (execution_cancelled())
         break;
@@ -244,6 +260,7 @@ static std::vector<RelRow> apply_join(std::vector<RelRow> left_rows,
         for (auto index : hash.at(*key)) {
           const auto combined = merge_rel_rows(left, right_rows[index]);
           if (truthy(eval_rel(join.on, catalog, combined, bindings))) {
+            account_query_memory(sizeof(RelRow), "join output");
             output.push_back(combined);
             matched = true;
             matched_right[index] = true;
@@ -251,8 +268,10 @@ static std::vector<RelRow> apply_join(std::vector<RelRow> left_rows,
         }
       }
       if (!matched &&
-          (join.kind == JoinKind::left || join.kind == JoinKind::full))
+          (join.kind == JoinKind::left || join.kind == JoinKind::full)) {
+        account_query_memory(sizeof(RelRow), "join output");
         output.push_back(left);
+      }
     }
   } else {
     for (auto &left : left_rows) {
@@ -262,20 +281,25 @@ static std::vector<RelRow> apply_join(std::vector<RelRow> left_rows,
       for (std::size_t index = 0; index < right_rows.size(); ++index) {
         const auto combined = merge_rel_rows(left, right_rows[index]);
         if (truthy(eval_rel(join.on, catalog, combined, bindings))) {
+          account_query_memory(sizeof(RelRow), "join output");
           output.push_back(combined);
           matched = true;
           matched_right[index] = true;
         }
       }
       if (!matched &&
-          (join.kind == JoinKind::left || join.kind == JoinKind::full))
+          (join.kind == JoinKind::left || join.kind == JoinKind::full)) {
+        account_query_memory(sizeof(RelRow), "join output");
         output.push_back(left);
+      }
     }
   }
   if (join.kind == JoinKind::right || join.kind == JoinKind::full)
     for (std::size_t index = 0; index < right_rows.size(); ++index)
-      if (!matched_right[index])
+      if (!matched_right[index]) {
+        account_query_memory(sizeof(RelRow), "join output");
         output.push_back(right_rows[index]);
+      }
   return output;
 }
 
@@ -301,8 +325,7 @@ struct Entry {
   std::vector<Agg> states;
 };
 class GroupTable {
-  std::vector<std::optional<Entry>> slots_ =
-      std::vector<std::optional<Entry>>(16);
+  std::vector<std::optional<Entry>> slots_;
   std::size_t size_{};
   std::size_t find(const Key &k) const {
     auto i = key_hash(k) & (slots_.size() - 1);
@@ -314,6 +337,8 @@ class GroupTable {
   }
   void grow() {
     auto old = std::move(slots_);
+    account_query_memory(old.size() * 2 * sizeof(std::optional<Entry>),
+                         "hash aggregation table growth");
     slots_ = std::vector<std::optional<Entry>>(old.size() * 2);
     size_ = 0;
     for (auto &e : old)
@@ -325,17 +350,25 @@ class GroupTable {
   }
 
 public:
+  GroupTable() {
+    account_query_memory(16 * sizeof(std::optional<Entry>),
+                         "hash aggregation table");
+    slots_.resize(16);
+  }
   std::vector<Agg> &get(const Key &k, const std::vector<Agg> &init) {
     if ((size_ + 1) * 10 > slots_.size() * 7)
       grow();
     auto i = find(k);
     if (!slots_[i]) {
+      account_query_memory(sizeof(Entry) + init.size() * sizeof(Agg),
+                           "hash aggregation group");
       slots_[i] = Entry{k, init};
       ++size_;
     }
     return slots_[i]->states;
   }
   std::vector<Entry> entries() {
+    account_query_memory(size_ * sizeof(Entry), "aggregation merge buffer");
     std::vector<Entry> v;
     v.reserve(size_);
     for (auto &e : slots_)
@@ -350,6 +383,8 @@ static GroupTable partition(const Query &q, const Table &t, std::size_t start,
   auto init = states(q);
   GroupTable groups;
   std::vector<std::size_t> selection;
+  account_query_memory(std::max<std::size_t>(1, batch) * sizeof(std::size_t),
+                       "aggregation selection");
   selection.reserve(std::max<std::size_t>(1, batch));
   for (auto bs = start; bs < end; bs += std::max<std::size_t>(1, batch)) {
     selection.clear();

@@ -13,6 +13,7 @@ set(DREMEL_ENGINE_HEADERS
     src/core/types.hpp
     src/execution/aggregate.hpp
     src/execution/evaluator.hpp
+    src/execution/memory.hpp
     src/execution/relational.hpp
     src/execution/scalar.hpp
     src/nested/levels.hpp

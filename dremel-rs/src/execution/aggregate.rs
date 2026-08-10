@@ -1,7 +1,7 @@
 use crate::execution::scalar::{cmp, eval};
 use crate::sql::*;
 use crate::storage::Table;
-use crate::types::Scalar;
+use crate::types::*;
 use std::cmp::Ordering;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -218,11 +218,15 @@ pub(crate) struct GroupTable {
     pub(crate) len: usize,
 }
 impl GroupTable {
-    pub(crate) fn new() -> Self {
-        Self {
+    pub(crate) fn new() -> Result<Self, String> {
+        account_query_memory(
+            16usize.saturating_mul(std::mem::size_of::<Option<Entry>>()),
+            "hash aggregation table",
+        )?;
+        Ok(Self {
             slots: vec![None; 16],
             len: 0,
-        }
+        })
     }
     pub(crate) fn find(&self, k: GroupKey) -> usize {
         let mut i = (key_hash(k) as usize) & (self.slots.len() - 1);
@@ -234,8 +238,12 @@ impl GroupTable {
             }
         }
     }
-    pub(crate) fn grow(&mut self) {
+    pub(crate) fn grow(&mut self) -> Result<(), String> {
         let next_capacity = self.slots.len() * 2;
+        account_query_memory(
+            next_capacity.saturating_mul(std::mem::size_of::<Option<Entry>>()),
+            "hash aggregation table growth",
+        )?;
         let old = std::mem::replace(&mut self.slots, vec![None; next_capacity]);
         self.len = 0;
         for e in old.into_iter().flatten() {
@@ -243,26 +251,41 @@ impl GroupTable {
             self.slots[i] = Some(e);
             self.len += 1
         }
+        Ok(())
     }
     pub(crate) fn get_or_insert(
         &mut self,
         k: GroupKey,
         template: &[AggState],
-    ) -> &mut Vec<AggState> {
+    ) -> Result<&mut Vec<AggState>, String> {
         if (self.len + 1) * 10 > self.slots.len() * 7 {
-            self.grow()
+            self.grow()?
         }
         let i = self.find(k);
         if self.slots[i].is_none() {
+            account_query_memory(
+                std::mem::size_of::<Entry>().saturating_add(
+                    template
+                        .len()
+                        .saturating_mul(std::mem::size_of::<AggState>()),
+                ),
+                "hash aggregation group",
+            )?;
             self.slots[i] = Some(Entry {
                 k,
                 s: template.to_vec(),
             });
             self.len += 1
         }
-        &mut self.slots[i].as_mut().expect("inserted").s
+        Ok(&mut self.slots[i].as_mut().expect("inserted").s)
     }
     pub(crate) fn into_entries(self) -> Vec<Entry> {
+        if !account_query_memory_or_stop(
+            self.len.saturating_mul(std::mem::size_of::<Entry>()),
+            "aggregation merge buffer",
+        ) {
+            return Vec::new();
+        }
         self.slots.into_iter().flatten().collect()
     }
 }
@@ -272,9 +295,13 @@ pub(crate) fn partition(
     start: usize,
     end: usize,
     batch: usize,
-) -> GroupTable {
+) -> Result<GroupTable, String> {
     let template = states(q);
-    let mut groups = GroupTable::new();
+    let mut groups = GroupTable::new()?;
+    account_query_memory(
+        batch.max(1).saturating_mul(std::mem::size_of::<usize>()),
+        "aggregation selection",
+    )?;
     let mut selection = Vec::with_capacity(batch.max(1));
     for bs in (start..end).step_by(batch.max(1)) {
         let be = (bs + batch).min(end);
@@ -292,11 +319,11 @@ pub(crate) fn partition(
             for (j, c) in q.group_by.iter().enumerate() {
                 k.v[j] = t.raw_key(c, i)
             }
-            let s = groups.get_or_insert(k, &template);
+            let s = groups.get_or_insert(k, &template)?;
             update(s, q, t, i)
         }
     }
-    groups
+    Ok(groups)
 }
 
 pub(crate) struct Job {
@@ -306,7 +333,8 @@ pub(crate) struct Job {
     pub(crate) start: usize,
     pub(crate) end: usize,
     pub(crate) batch: usize,
-    pub(crate) reply: mpsc::Sender<(usize, GroupTable)>,
+    pub(crate) memory: Option<Arc<QueryMemory>>,
+    pub(crate) reply: mpsc::Sender<(usize, Result<GroupTable, String>)>,
 }
 pub struct Pool {
     pub(crate) tx: Option<mpsc::Sender<Job>>,
@@ -328,7 +356,10 @@ impl Pool {
                         lock.recv()
                     };
                     let Ok(j) = job else { break };
+                    let previous_memory = current_query_memory();
+                    set_query_memory(j.memory.clone());
                     let out = partition(&j.q, &j.t, j.start, j.end, j.batch);
+                    set_query_memory(previous_memory);
                     let _ = j.reply.send((j.partition_id, out));
                 }
             }));
@@ -339,7 +370,12 @@ impl Pool {
             threads: n,
         }
     }
-    pub(crate) fn aggregate(&self, q: Arc<Query>, t: Arc<Table>, batch: usize) -> GroupTable {
+    pub(crate) fn aggregate(
+        &self,
+        q: Arc<Query>,
+        t: Arc<Table>,
+        batch: usize,
+    ) -> Result<GroupTable, String> {
         let parts = self.threads * 4;
         let (tx, rx) = mpsc::channel();
         for p in 0..parts {
@@ -351,6 +387,7 @@ impl Pool {
                 start: p * n / parts,
                 end: (p + 1) * n / parts,
                 batch,
+                memory: current_query_memory(),
                 reply: tx.clone(),
             };
             self.tx
@@ -361,16 +398,16 @@ impl Pool {
         }
         drop(tx);
         let template = states(&q);
-        let mut final_t = GroupTable::new();
+        let mut final_t = GroupTable::new()?;
         let mut completed: Vec<_> = rx.into_iter().collect();
         completed.sort_by_key(|(partition_id, _)| *partition_id);
         for (_, part) in completed {
-            for e in part.into_entries() {
-                let target = final_t.get_or_insert(e.k, &template);
+            for e in part?.into_entries() {
+                let target = final_t.get_or_insert(e.k, &template)?;
                 merge(target, &e.s)
             }
         }
-        final_t
+        Ok(final_t)
     }
 }
 impl Drop for Pool {

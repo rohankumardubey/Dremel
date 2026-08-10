@@ -28,6 +28,9 @@ fn real_main() -> Result<(), String> {
         memory_limit_mb: value(&args, "--memory-limit-mb", "0")
             .parse()
             .map_err(|_| "invalid --memory-limit-mb")?,
+        query_memory_limit_mb: value(&args, "--query-memory-limit-mb", "0")
+            .parse()
+            .map_err(|_| "invalid --query-memory-limit-mb")?,
         max_result_rows: value(&args, "--max-result-rows", "0")
             .parse()
             .map_err(|_| "invalid --max-result-rows")?,
@@ -54,7 +57,7 @@ fn real_main() -> Result<(), String> {
         }
         _ => {
             println!(
-                "dremel-rs query|bench-server --data PATH --threads N --batch-size N [--sql SQL] [--explain]"
+                "dremel-rs query|bench-server --data PATH --threads N --batch-size N [--query-memory-limit-mb N] [--sql SQL] [--explain]"
             );
             Ok(())
         }

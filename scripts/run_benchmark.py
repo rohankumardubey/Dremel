@@ -54,6 +54,7 @@ class Server:
         self, name: str, command: list[str], env: dict[str, str] | None = None
     ):
         self.name = name
+        self.last_query_memory = {"limit_bytes": 0, "accounted_bytes": 0}
         self.process = subprocess.Popen(
             command,
             cwd=ROOT,
@@ -99,6 +100,11 @@ class Server:
 
     def execute(self, qid: str, rows: bool = False) -> tuple[int, list]:
         p = self.command(f"EXEC\t{qid}\t{int(rows)}")
+        if len(p) >= 6:
+            self.last_query_memory = {
+                "limit_bytes": int(p[4]),
+                "accounted_bytes": int(p[5]),
+            }
         return int(p[1]), json.loads(p[3])
 
     def e2e(self, qid: str, sql: str) -> int:
@@ -336,6 +342,7 @@ def environment_text(cfg, metadata, rust, cpp, args, rust_rss, cpp_rss) -> str:
         "batch_size": cfg["batch_size"],
         "thread_count": cfg["threads"],
         "logical_partitions": cfg["partitions"],
+        "query_memory_limit_mb": args.query_memory_limit_mb,
         "warmup_count": args.warmup,
         "measurement_count": args.iterations,
         "tie_threshold_pct": args.tie_threshold,
@@ -368,6 +375,11 @@ def main() -> int:
     parser.add_argument(
         "--batch-size", type=int, default=int(os.getenv("BATCH_SIZE", "4096"))
     )
+    parser.add_argument(
+        "--query-memory-limit-mb",
+        type=int,
+        default=int(os.getenv("QUERY_MEMORY_LIMIT_MB", "0")),
+    )
     parser.add_argument("--warmup", type=int, default=int(os.getenv("WARMUP", "3")))
     parser.add_argument(
         "--iterations", type=int, default=int(os.getenv("ITERATIONS", "20"))
@@ -388,9 +400,11 @@ def main() -> int:
         or args.warmup < 0
         or args.threads < 1
         or args.batch_size < 1
+        or args.query_memory_limit_mb < 0
     ):
         parser.error(
-            "threads, batch size and iterations must be positive; warmup cannot be negative"
+            "threads, batch size and iterations must be positive; "
+            "warmup and query memory limit cannot be negative"
         )
     manifest_path = args.manifest.resolve()
     manifest = json.loads(manifest_path.read_text())
@@ -422,6 +436,8 @@ def main() -> int:
         str(args.threads),
         "--batch-size",
         str(args.batch_size),
+        "--query-memory-limit-mb",
+        str(args.query_memory_limit_mb),
     ]
     servers: list[Server] = []
     try:
@@ -448,7 +464,9 @@ def main() -> int:
             "rows": metadata["row_count"],
         }:
             raise RuntimeError(f"engine configuration does not match controller: {cfg}")
+        cfg = {**cfg, "query_memory_limit_mb": args.query_memory_limit_mb}
         correctness = {}
+        memory_accounting = {}
         print(f"Validating {query_count} queries...", flush=True)
         for index, item in enumerate(manifest):
             qid, sql = item["query_id"], item["sql"]
@@ -461,7 +479,14 @@ def main() -> int:
                     f"{qid} physical operator mismatch: {rust_plan} != {cpp_plan}"
                 )
             _, rr = rust.execute(qid, True)
+            rust_memory = dict(rust.last_query_memory)
             _, cr = cpp.execute(qid, True)
+            cpp_memory = dict(cpp.last_query_memory)
+            if rust_memory["limit_bytes"] != cpp_memory["limit_bytes"]:
+                raise RuntimeError(
+                    f"{qid} query memory limits differ: "
+                    f"Rust={rust_memory['limit_bytes']} C++={cpp_memory['limit_bytes']}"
+                )
             ordered = "ORDER BY" in sql.upper()
             ok, detail = compare_rows(rr, cr, ordered)
             if not ok:
@@ -475,6 +500,7 @@ def main() -> int:
                 "row_count": len(rr),
                 "result_hash": result_hash(rr, ordered),
             }
+            memory_accounting[qid] = {"rust": rust_memory, "cpp": cpp_memory}
             print(f"  {qid} MATCH", flush=True)
         if args.validate_only:
             print(f"Correctness: {query_count} / {query_count} MATCH")
@@ -561,6 +587,15 @@ def main() -> int:
                     "cpp_e2e_median_ms": c["end_to_end"]["median_ns"] / 1e6,
                     "rust_e2e_median_ms": r["end_to_end"]["median_ns"] / 1e6,
                     "result_hash": r["result_hash"],
+                    "query_memory_limit_bytes": memory_accounting[qid]["rust"][
+                        "limit_bytes"
+                    ],
+                    "rust_query_memory_accounted_bytes": memory_accounting[qid][
+                        "rust"
+                    ]["accounted_bytes"],
+                    "cpp_query_memory_accounted_bytes": memory_accounting[qid]["cpp"][
+                        "accounted_bytes"
+                    ],
                 }
             )
         geomean = math.exp(statistics.mean(math.log(x) for x in ratios))
@@ -624,6 +659,8 @@ def main() -> int:
                 "Correctness    : MATCH",
                 f"Rows returned  : {r['row_count']}",
                 f"Result hash    : {r['result_hash']}",
+                f"C++ memory    : {row['cpp_query_memory_accounted_bytes']} accounted bytes",
+                f"Rust memory   : {row['rust_query_memory_accounted_bytes']} accounted bytes",
             ]
         interpretation = (
             f"Rust median latency was approximately {(geomean - 1) * 100:.2f}% higher"
@@ -644,6 +681,12 @@ def main() -> int:
             f"Threads:              {cfg['threads']}",
             f"Batch size:           {cfg['batch_size']}",
             f"Partitions:           {cfg['partitions']}",
+            "Query memory cap:     "
+            + (
+                f"{args.query_memory_limit_mb} MiB"
+                if args.query_memory_limit_mb
+                else "unlimited"
+            ),
             f"Warmups:              {args.warmup}",
             f"Iterations:           {args.iterations}",
             f"LTO:                  {'enabled' if os.getenv('LTO', '0') == '1' else 'disabled'}",

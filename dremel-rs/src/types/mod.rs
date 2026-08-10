@@ -1,3 +1,7 @@
+mod memory;
+
+pub(crate) use memory::*;
+
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -9,6 +13,7 @@ pub struct Options {
     pub threads: usize,
     pub batch_size: usize,
     pub memory_limit_mb: usize,
+    pub query_memory_limit_mb: usize,
     pub max_result_rows: usize,
     pub max_active_queries: usize,
     pub admission_queue_capacity: usize,
@@ -47,12 +52,13 @@ thread_local! {
 
 pub(crate) fn execution_cancelled() -> bool {
     EXECUTION_CONTROL.with(|slot| {
-        slot.borrow().as_ref().is_some_and(|control| {
+        let stopped = slot.borrow().as_ref().is_some_and(|control| {
             control.cancelled.load(AtomicOrdering::Relaxed)
                 || control
                     .deadline
                     .is_some_and(|deadline| Instant::now() >= deadline)
-        })
+        });
+        stopped || query_memory_failed()
     })
 }
 

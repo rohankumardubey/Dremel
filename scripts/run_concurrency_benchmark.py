@@ -121,7 +121,8 @@ def run_mix(
     # Initialize catalog and worker machinery outside the measured interval.
     warm_id = f"{name}-warmup"
     response = server.command(
-        f"SUBMIT\t{warm_id}\t{query_ids[0]}\t1\twarmup\t15000\t4\t0"
+        f"SUBMIT\t{warm_id}\t{query_ids[0]}\t1\twarmup\t15000\t"
+        f"{mix['reservation_mb']}\t0"
     )
     if response[0] != "ACCEPTED":
         raise RuntimeError(f"{name}: scheduler warmup rejected: {response}")

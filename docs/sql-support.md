@@ -48,8 +48,22 @@ Set `DREMEL_DISABLE_OPTIMIZER=1` to build a comparable unoptimized plan.
 The long-lived benchmark server has a bounded admission queue, global and
 per-group memory limits, active-query limits, deadlines, cancellation, and a
 4:2:1 priority-weighted scheduler. FIFO order is preserved within each
-priority/resource group. The concurrency benchmark reports throughput,
+priority/resource group. Each admitted request's memory reservation is also
+its hard query workspace cap. The concurrency benchmark reports throughput,
 outcomes, queue and execution latency percentiles, and Jain's fairness index.
+
+## Memory-bounded execution
+
+`--query-memory-limit-mb` applies a query-scoped budget shared by all worker
+threads. Both engines account scan selections, hash aggregation
+tables, join build tables and outputs, distinct sets, window state,
+intermediate relations, top-k buffers, and result materialization. Accounting
+is monotonic for the lifetime of a query, so it can reject a query even when an
+earlier operator's allocation is no longer live. The value is an operator
+accounting metric, not process RSS. Budget exhaustion returns
+`RESOURCE_EXHAUSTED` without returning a partial result. The cap does not
+include the read-only loaded table; use `--memory-limit-mb` for table
+admission.
 
 ## Out of scope
 

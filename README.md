@@ -113,8 +113,14 @@ Use an interoperable file by changing `--data` in either command:
 query uses those tables. The files are generated deterministically by official
 PyArrow and read through the official Rust and C++ Arrow/Parquet libraries.
 
-Use `--stats` for scan and execution counters. `--memory-limit-mb` and
-`--max-result-rows` enable resource admission limits. See
+Use `--stats` for scan and execution counters. `--memory-limit-mb` limits the
+loaded table, while `--query-memory-limit-mb` places a hard cap on accounted
+query workspace. Hash aggregation, joins, distinct sets, windows, intermediate
+relations, scan selections, and result rows participate in the cap.
+Optimized `ORDER BY ... LIMIT` queries retain only `limit + offset` rows. A
+query that cannot stay inside the cap returns `RESOURCE_EXHAUSTED`; `0` keeps
+the query cap disabled. `--max-result-rows` provides a separate result
+cardinality limit. See
 [SQL support](docs/sql-support.md) for the implemented language surface.
 
 ## How the comparison works
@@ -150,6 +156,7 @@ ctest --test-dir dremel-cpp/build --output-on-failure
 
 python3 scripts/differential_test.py
 python3 scripts/test_resource_limits.py
+python3 scripts/test_memory_limits.py
 ```
 
 CI runs the same checks on macOS with the pinned toolchains. The `Dockerfile`
@@ -160,3 +167,7 @@ The current Arrow and Parquet path decodes the full file into the engine's
 in-memory columns. Row-group pruning and direct predicate pushdown are future
 work. Distributed exchange, durable spill/recovery, transactions, and database
 wire protocols are also outside the current scope.
+
+The main benchmark also runs `benchmark/memory/manifest.json` with a 256 MiB
+query workspace cap. Set `MEMORY_BOUNDED=0` to skip that suite or change the
+cap with `QUERY_MEMORY_LIMIT_MB`.
