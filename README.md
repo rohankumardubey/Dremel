@@ -1,6 +1,6 @@
 # Dremel Bench
 
-Two small columnar SQL engines—one in Rust and one in C++—built to answer the
+Two small columnar SQL engines, one in Rust and one in C++, built to answer the
 same queries over the same bytes. The repository is a practical test bed for
 query execution, optimization, and concurrent workload scheduling rather than
 a general-purpose database.
