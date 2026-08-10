@@ -1,0 +1,8 @@
+data/
+results/
+dremel-rs/target/
+dremel-cpp/build/
+__pycache__/
+.ruff_cache/
+*.py[cod]
+.DS_Store

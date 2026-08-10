@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "scheduler": {
+    "max_active_queries": 4,
+    "queue_capacity": 64,
+    "memory_mb": 512
+  },
+  "queries": [
+    {
+      "query_id": "C001",
+      "category": "selective_count",
+      "file": "queries/C001.sql",
+      "description": "SELECT COUNT(*) FROM events WHERE country = 'IN'"
+    },
+    {
+      "query_id": "C002",
+      "category": "group_aggregate",
+      "file": "queries/C002.sql",
+      "description": "SELECT country, COUNT(*) AS total FROM events GROUP BY country ORDER BY country ASC"
+    },
+    {
+      "query_id": "C003",
+      "category": "hash_join",
+      "file": "queries/C003.sql",
+      "description": "SELECT COUNT(*) FROM events e JOIN campaigns c ON e.campaign_id = c.campaign_id"
+    },
+    {
+      "query_id": "C004",
+      "category": "top_k",
+      "file": "queries/C004.sql",
+      "description": "SELECT event_id, score FROM events ORDER BY score DESC, event_id ASC LIMIT 25"
+    },
+    {
+      "query_id": "C005",
+      "category": "filtered_projection",
+      "file": "queries/C005.sql",
+      "description": "SELECT event_id, duration_ms FROM events WHERE score >= 99.5 ORDER BY event_id ASC LIMIT 50"
+    }
+  ],
+  "mix": {
+    "request_count": 30,
+    "priorities": [
+      2,
+      0,
+      1,
+      2,
+      1,
+      0,
+      2,
+      1,
+      2,
+      0
+    ],
+    "groups": [
+      "interactive",
+      "batch",
+      "tenant_c"
+    ],
+    "normal_deadline_ms": 15000,
+    "short_deadline_every": 11,
+    "short_deadline_ms": 1,
+    "cancel_every": 13,
+    "reservation_mb": 4
+  }
+}

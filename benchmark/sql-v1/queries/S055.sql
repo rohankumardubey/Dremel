@@ -1,0 +1,1 @@
+WITH first_totals AS (SELECT country, COUNT(*) AS total FROM events GROUP BY country), filtered_totals AS (SELECT country, total FROM first_totals WHERE total > 0) SELECT country, total FROM filtered_totals ORDER BY country ASC;

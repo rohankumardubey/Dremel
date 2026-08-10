@@ -1,0 +1,1 @@
+SELECT a.country, a.total, b.total_bytes FROM (SELECT country, COUNT(*) AS total FROM events GROUP BY country) a JOIN (SELECT country, SUM(bytes) AS total_bytes FROM events GROUP BY country) b ON a.country = b.country ORDER BY a.country ASC;

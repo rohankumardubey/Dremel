@@ -1,0 +1,1 @@
+WITH event_counts AS (SELECT country, COUNT(*) AS total FROM events GROUP BY country), region_counts AS (SELECT region, COUNT(*) AS total FROM users GROUP BY region) SELECT a.country, b.region FROM event_counts a FULL JOIN region_counts b ON a.country = b.region ORDER BY a.country ASC NULLS LAST, b.region ASC NULLS LAST;

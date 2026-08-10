@@ -1,0 +1,8 @@
+.git
+data
+results
+dremel-rs/target
+dremel-cpp/build
+__pycache__
+*.py[cod]
+.DS_Store

@@ -1,0 +1,1 @@
+WITH segment_events AS (SELECT u.segment, COUNT(*) AS event_count FROM events e JOIN users u ON e.user_id = u.user_id GROUP BY u.segment) SELECT segment, event_count FROM segment_events WHERE event_count > 1000 ORDER BY segment ASC;

@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM events WHERE duration_ms NOT BETWEEN 100 AND 9000;

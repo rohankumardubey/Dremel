@@ -1,0 +1,117 @@
+[
+  {
+    "query_id": "O001",
+    "category": "constant_folding",
+    "file": "queries/O001.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE (1 + 2) = 3 AND country = 'IN'",
+    "expected_optimized_operators": [
+      "OptimizerExec"
+    ],
+    "expected_disabled_operator": null,
+    "execute_disabled": true,
+    "minimum_rewrites": 1
+  },
+  {
+    "query_id": "O002",
+    "category": "three_valued_logic",
+    "file": "queries/O002.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE true AND (success = true OR false)",
+    "expected_optimized_operators": [
+      "OptimizerExec"
+    ],
+    "expected_disabled_operator": null,
+    "execute_disabled": true,
+    "minimum_rewrites": 1
+  },
+  {
+    "query_id": "O003",
+    "category": "projection_pruning",
+    "file": "queries/O003.sql",
+    "description": "SELECT event_id FROM events WHERE country = 'US' LIMIT 1000",
+    "expected_optimized_operators": [
+      "ScanExec",
+      "OptimizerExec"
+    ],
+    "expected_disabled_operator": null,
+    "execute_disabled": true,
+    "required_plan_fragments": [
+      "ScanExec(columns=[country,event_id])"
+    ]
+  },
+  {
+    "query_id": "O004",
+    "category": "top_k",
+    "file": "queries/O004.sql",
+    "description": "SELECT event_id, score FROM events ORDER BY score DESC, event_id ASC LIMIT 100",
+    "expected_optimized_operators": [
+      "TopKExec"
+    ],
+    "expected_disabled_operator": "SortExec",
+    "execute_disabled": true,
+    "required_plan_fragments": [
+      "TopKExec(k=100)"
+    ]
+  },
+  {
+    "query_id": "O005",
+    "category": "top_k_offset",
+    "file": "queries/O005.sql",
+    "description": "SELECT event_id, duration_ms FROM events ORDER BY duration_ms DESC, event_id ASC LIMIT 250 OFFSET 500",
+    "expected_optimized_operators": [
+      "TopKExec"
+    ],
+    "expected_disabled_operator": "SortExec",
+    "execute_disabled": true,
+    "required_plan_fragments": [
+      "TopKExec(k=750)"
+    ]
+  },
+  {
+    "query_id": "O006",
+    "category": "hash_join_runtime_filter",
+    "file": "queries/O006.sql",
+    "description": "SELECT COUNT(*) FROM events e JOIN campaigns c ON e.campaign_id = c.campaign_id",
+    "expected_optimized_operators": [
+      "HashJoinExec"
+    ],
+    "expected_disabled_operator": "NestedLoopJoinExec",
+    "execute_disabled": false,
+    "required_plan_fragments": [
+      "build=right",
+      "runtime_filter=true"
+    ]
+  },
+  {
+    "query_id": "O007",
+    "category": "join_ordering",
+    "file": "queries/O007.sql",
+    "description": "SELECT COUNT(*) FROM events e JOIN users u ON e.user_id = u.user_id JOIN campaigns c ON e.campaign_id = c.campaign_id",
+    "expected_optimized_operators": [
+      "HashJoinExec",
+      "OptimizerExec"
+    ],
+    "expected_disabled_operator": "NestedLoopJoinExec",
+    "execute_disabled": false,
+    "minimum_rewrites": 1,
+    "ordered_plan_fragments": [
+      "table=campaigns",
+      "table=users"
+    ]
+  },
+  {
+    "query_id": "O008",
+    "category": "aggregate_filter_pushdown",
+    "file": "queries/O008.sql",
+    "description": "SELECT country, COUNT(*) AS total FROM events WHERE score >= 90.0 GROUP BY country HAVING COUNT(*) > 0 ORDER BY total DESC",
+    "expected_optimized_operators": [
+      "FilterExec",
+      "PartialAggregateExec"
+    ],
+    "expected_disabled_operator": null,
+    "execute_disabled": true,
+    "ordered_operators": [
+      "FilterExec",
+      "PartialAggregateExec"
+    ]
+  }
+]

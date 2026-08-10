@@ -1,0 +1,146 @@
+# Dremel Bench
+
+Two small columnar SQL engines—one in Rust and one in C++—built to answer the
+same queries over the same bytes. The repository is a practical test bed for
+query execution, optimization, and concurrent workload scheduling rather than
+a general-purpose database.
+
+The design borrows the columnar layout and nested-record ideas described in the
+[Dremel paper](https://research.google/pubs/dremel-interactive-analysis-of-web-scale-datasets-2/).
+It is an independent implementation and is not Google Dremel or BigQuery.
+
+## What is included
+
+| Area | Implementation |
+| --- | --- |
+| Engines | Rust 1.97.1 (Rust 2024) and LLVM Clang 22.1.8 (C++26) |
+| Storage | Deterministic `DREMCOL1` column store with dictionary-encoded strings |
+| Execution | Batched scans, selection vectors, partitioned aggregation, joins and windows |
+| Optimizer | Pushdown, pruning, constant folding, join selection/reordering, runtime filters and Top-K |
+| Workloads | 64 baseline, 16 hardening, 68 SQL, 8 optimizer and 5 concurrency cases |
+| Validation | Cross-engine typed results, SQLite differential tests and plan assertions |
+
+The toolchains are pinned so a later compiler update does not silently change
+the comparison. Rust's `2024` label is the language edition, not the compiler
+release year.
+
+## Quick start
+
+Requirements:
+
+- Python 3.11 or newer
+- Rust 1.97.1 with `rustfmt` and `clippy`
+- CMake 3.20 or newer
+- LLVM Clang 22 with C++26 support
+
+Run a small end-to-end check:
+
+```bash
+DATASET_ROWS=20000 WARMUP=1 ITERATIONS=3 ./benchmark.sh
+```
+
+This generates the dataset, builds and tests both engines, validates their
+results, and runs every enabled workload. Generated data, build products, and
+reports stay under ignored directories.
+
+The default benchmark uses one million events, three warmups, and twenty timed
+iterations:
+
+```bash
+./benchmark.sh
+```
+
+Results are written to `results/` as JSON, CSV, environment metadata, and a
+plain-text summary. Raw nanosecond samples are retained in the JSON reports.
+
+## Benchmark configuration
+
+The runner is configured through environment variables:
+
+```bash
+DATASET_ROWS=5000000 \
+DATASET_SEED=12345 \
+BENCH_THREADS=8 \
+BATCH_SIZE=8192 \
+WARMUP=5 \
+ITERATIONS=30 \
+TIE_THRESHOLD_PCT=0 \
+LTO=1 \
+NATIVE=1 \
+./benchmark.sh
+```
+
+`EXTENDED`, `SQL_V1`, `OPTIMIZER`, and `CONCURRENCY` default to `1`. Set any of
+them to `0` to skip that suite. On Linux, `BENCH_CPUSET=0-7` pins both servers
+through `taskset`.
+
+## Running an individual query
+
+After a release build and dataset generation:
+
+```bash
+./dremel-rs/target/release/dremel-rs query \
+  --data data/events.dremel --threads 4 --batch-size 4096 \
+  --sql "SELECT country, COUNT(*) AS count FROM events GROUP BY country"
+
+./dremel-cpp/build/dremel-cpp query \
+  --data data/events.dremel --threads 4 --batch-size 4096 \
+  --sql "SELECT country, COUNT(*) AS count FROM events GROUP BY country" \
+  --explain
+```
+
+Use `--stats` for scan and execution counters. `--memory-limit-mb` and
+`--max-result-rows` enable resource admission limits. See
+[SQL support](docs/sql-support.md) for the implemented language surface.
+
+## How the comparison works
+
+Both engines load the same versioned binary column store and execute matching
+physical algorithms. Each query is prepared before its primary timer begins;
+parsing and planning are reported separately as end-to-end latency. Engine
+order alternates on every iteration, and only one timed query runs at a time.
+
+The headline comparison uses per-query median execution latency. Differences
+inside `TIE_THRESHOLD_PCT` are ties, and the workload summary is the geometric
+mean of the Rust/C++ ratios. Results are checked before they are counted:
+unordered rows are canonicalized, ordered rows remain in order, and floating
+point values use absolute and relative tolerances of `1e-9`.
+
+This controls the workload and engine design; it does not make the compilers,
+standard libraries, allocators, or language runtimes identical. A result from
+one machine describes these two implementations on that machine, not either
+language in general.
+
+## Tests
+
+```bash
+cargo fmt --manifest-path dremel-rs/Cargo.toml --check
+cargo test --manifest-path dremel-rs/Cargo.toml
+cargo clippy --manifest-path dremel-rs/Cargo.toml --all-targets --all-features -- -D warnings
+
+cmake -S dremel-cpp -B dremel-cpp/build -DCMAKE_BUILD_TYPE=Release \
+  -DDREMEL_CXX_STANDARD=26
+cmake --build dremel-cpp/build -j
+ctest --test-dir dremel-cpp/build --output-on-failure
+
+python3 scripts/differential_test.py
+python3 scripts/test_resource_limits.py
+```
+
+CI runs the same checks on macOS with the pinned toolchains. The `Dockerfile`
+provides a Linux correctness environment; do not mix Docker measurements with
+native host measurements.
+
+## Repository layout
+
+```text
+benchmark/    SQL corpora and workload manifests
+dremel-cpp/   C++26 engine
+dremel-rs/    Rust engine
+docs/         Supported SQL surface
+scripts/      Dataset, validation, and benchmark tooling
+```
+
+The project is intentionally single-machine and in-memory. Distributed
+exchange, durable spill/recovery, transactions, and database wire protocols
+are outside its current scope.

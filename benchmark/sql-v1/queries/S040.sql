@@ -1,0 +1,1 @@
+WITH country_totals AS (SELECT country, COUNT(*) AS total FROM events GROUP BY country), region_totals AS (SELECT region, COUNT(*) AS total FROM users GROUP BY region) SELECT region, total FROM region_totals ORDER BY region ASC;

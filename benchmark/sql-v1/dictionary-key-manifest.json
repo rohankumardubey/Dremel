@@ -1,0 +1,14 @@
+[
+  {
+    "query_id": "S056",
+    "category": "cte_to_cte_join",
+    "file": "queries/S056.sql",
+    "description": "Dictionary-backed grouping feeding a CTE join"
+  },
+  {
+    "query_id": "S057",
+    "category": "derived_table_join",
+    "file": "queries/S057.sql",
+    "description": "Dictionary-backed grouping feeding a derived-table join"
+  }
+]

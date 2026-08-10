@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM events WHERE score BETWEEN 25.0 AND 75.0;

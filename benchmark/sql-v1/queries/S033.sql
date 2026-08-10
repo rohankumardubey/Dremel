@@ -1,0 +1,1 @@
+SELECT event_id, SUM(bytes) OVER (PARTITION BY country ORDER BY event_id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_bytes FROM events WHERE event_id <= 100000 ORDER BY event_id ASC LIMIT 1000;

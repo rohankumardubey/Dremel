@@ -1,0 +1,1 @@
+SELECT event_id, LAG(bytes, 1, 0) OVER (PARTITION BY user_id ORDER BY timestamp ASC) AS previous_bytes, LEAD(bytes, 1, 0) OVER (PARTITION BY user_id ORDER BY timestamp ASC) AS next_bytes FROM events WHERE event_id <= 100000 ORDER BY event_id ASC LIMIT 1000;

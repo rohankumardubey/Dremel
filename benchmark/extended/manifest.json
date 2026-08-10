@@ -1,0 +1,98 @@
+[
+  {
+    "query_id": "E001",
+    "category": "nullable_expression",
+    "file": "queries/E001.sql",
+    "description": "SELECT event_id, campaign_id > 2500 AS high_campaign FROM events LIMIT 1000"
+  },
+  {
+    "query_id": "E002",
+    "category": "nullable_expression",
+    "file": "queries/E002.sql",
+    "description": "SELECT event_id, NOT (campaign_id > 2500) AS low_campaign FROM events LIMIT 1000"
+  },
+  {
+    "query_id": "E003",
+    "category": "arithmetic_aggregate",
+    "file": "queries/E003.sql",
+    "description": "SELECT SUM(bytes + duration_ms) AS total_work FROM events"
+  },
+  {
+    "query_id": "E004",
+    "category": "arithmetic_aggregate",
+    "file": "queries/E004.sql",
+    "description": "SELECT AVG(bytes / (duration_ms + 1)) AS transfer_rate FROM events"
+  },
+  {
+    "query_id": "E005",
+    "category": "complex_predicate",
+    "file": "queries/E005.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE NOT success = false AND (score >= 80.0 OR bytes > 950000)"
+  },
+  {
+    "query_id": "E006",
+    "category": "nullable_group",
+    "file": "queries/E006.sql",
+    "description": "SELECT country, COUNT(*) AS cnt, AVG(campaign_id) AS avg_campaign FROM events WHERE campaign_id > 2500 GROUP BY country ORDER BY country ASC"
+  },
+  {
+    "query_id": "E007",
+    "category": "arithmetic_projection",
+    "file": "queries/E007.sql",
+    "description": "SELECT event_id, bytes / (duration_ms + 1) AS transfer_rate FROM events WHERE success = true LIMIT 1000"
+  },
+  {
+    "query_id": "E008",
+    "category": "three_valued_filter",
+    "file": "queries/E008.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE campaign_id > 4500 OR success = true"
+  },
+  {
+    "query_id": "E009",
+    "category": "heavy_expression_group",
+    "file": "queries/E009.sql",
+    "description": "SELECT event_type, SUM(bytes + duration_ms) AS total_work, AVG(score * 1.5) AS weighted_score FROM events GROUP BY event_type"
+  },
+  {
+    "query_id": "E010",
+    "category": "ordered_expression_group",
+    "file": "queries/E010.sql",
+    "description": "SELECT country, SUM(bytes + duration_ms) AS total_work FROM events GROUP BY country ORDER BY total_work DESC LIMIT 5"
+  },
+  {
+    "query_id": "E011",
+    "category": "negated_predicate",
+    "file": "queries/E011.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE NOT (country = 'IN' OR device = 'mobile')"
+  },
+  {
+    "query_id": "E012",
+    "category": "arithmetic_min",
+    "file": "queries/E012.sql",
+    "description": "SELECT MIN(bytes - duration_ms) AS minimum_delta FROM events"
+  },
+  {
+    "query_id": "E013",
+    "category": "arithmetic_max",
+    "file": "queries/E013.sql",
+    "description": "SELECT MAX(score * duration_ms) AS maximum_weighted_duration FROM events"
+  },
+  {
+    "query_id": "E014",
+    "category": "complex_multi_group",
+    "file": "queries/E014.sql",
+    "description": "SELECT country, device, COUNT(*) AS cnt, AVG(score) AS avg_score FROM events WHERE success = true AND score > 25.0 GROUP BY country, device ORDER BY cnt DESC LIMIT 20"
+  },
+  {
+    "query_id": "E015",
+    "category": "nullable_aggregates",
+    "file": "queries/E015.sql",
+    "description": "SELECT COUNT(campaign_id) AS campaign_count, SUM(campaign_id) AS campaign_sum, AVG(campaign_id) AS campaign_avg, MIN(campaign_id) AS campaign_min, MAX(campaign_id) AS campaign_max FROM events"
+  },
+  {
+    "query_id": "E016",
+    "category": "wide_projection",
+    "file": "queries/E016.sql",
+    "description": "SELECT event_id, user_id, country, device, event_type, duration_ms, bytes, score, success, campaign_id FROM events WHERE score > 99.0 LIMIT 1000"
+  }
+]

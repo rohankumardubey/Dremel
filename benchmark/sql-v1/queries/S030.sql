@@ -1,0 +1,1 @@
+SELECT event_id, RANK() OVER (PARTITION BY device ORDER BY duration_ms DESC) AS rank_value, DENSE_RANK() OVER (PARTITION BY device ORDER BY duration_ms DESC) AS dense_rank_value FROM events WHERE event_id <= 100000 ORDER BY event_id ASC LIMIT 1000;

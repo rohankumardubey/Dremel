@@ -1,0 +1,478 @@
+[
+  {
+    "query_id": "S001",
+    "category": "qualified_names",
+    "file": "queries/S001.sql",
+    "description": "SELECT events.event_id, events.country FROM events WHERE events.event_id <= 1000 ORDER BY event_id ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S002",
+    "category": "searched_case",
+    "file": "queries/S002.sql",
+    "description": "SELECT event_id, CASE WHEN score >= 90.0 THEN 'high' WHEN score >= 50.0 THEN 'medium' ELSE 'low' END AS score_band FROM events LIMIT 1000",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S003",
+    "category": "case_aggregate",
+    "file": "queries/S003.sql",
+    "description": "SELECT SUM(CASE WHEN success = true THEN bytes ELSE 0 END) AS successful_bytes FROM events",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S004",
+    "category": "in",
+    "file": "queries/S004.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE country IN ('IN', 'US', 'SG')",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S005",
+    "category": "not_in_null",
+    "file": "queries/S005.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE campaign_id NOT IN (1, 2, 3, NULL)",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S006",
+    "category": "between",
+    "file": "queries/S006.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE score BETWEEN 25.0 AND 75.0",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S007",
+    "category": "not_between",
+    "file": "queries/S007.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE duration_ms NOT BETWEEN 100 AND 9000",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S008",
+    "category": "like",
+    "file": "queries/S008.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE event_type LIKE 'cl_ck'",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S009",
+    "category": "not_like",
+    "file": "queries/S009.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE device NOT LIKE '%ile'",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S010",
+    "category": "cast",
+    "file": "queries/S010.sql",
+    "description": "SELECT event_id, CAST(score AS bigint) AS whole_score, CAST(event_id AS varchar) AS event_text FROM events LIMIT 1000",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S011",
+    "category": "coalesce",
+    "file": "queries/S011.sql",
+    "description": "SELECT event_id, COALESCE(campaign_id, 0) AS campaign FROM events LIMIT 1000",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S012",
+    "category": "nullif",
+    "file": "queries/S012.sql",
+    "description": "SELECT event_id, NULLIF(device, 'mobile') AS non_mobile FROM events LIMIT 1000",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S013",
+    "category": "string_case",
+    "file": "queries/S013.sql",
+    "description": "SELECT event_id, LOWER(country) AS lower_country, UPPER(device) AS upper_device, LENGTH(event_type) AS event_length FROM events LIMIT 1000",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S014",
+    "category": "string_compose",
+    "file": "queries/S014.sql",
+    "description": "SELECT event_id, CONCAT(SUBSTRING(event_type, 1, 3), '-', CAST(user_id AS varchar)) AS label FROM events LIMIT 1000",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S015",
+    "category": "escaped_literal",
+    "file": "queries/S015.sql",
+    "description": "SELECT 'Dremel''s SQL' AS label FROM events LIMIT 1",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S016",
+    "category": "alternate_not_equal",
+    "file": "queries/S016.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE country <> 'IN'",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S017",
+    "category": "users_scan",
+    "file": "queries/S017.sql",
+    "description": "SELECT COUNT(*) FROM users",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S018",
+    "category": "campaigns_scan",
+    "file": "queries/S018.sql",
+    "description": "SELECT COUNT(*) FROM campaigns",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S019",
+    "category": "inner_hash_join",
+    "file": "queries/S019.sql",
+    "description": "SELECT COUNT(*) FROM events e INNER JOIN users u ON e.user_id = u.user_id",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S020",
+    "category": "join_group",
+    "file": "queries/S020.sql",
+    "description": "SELECT u.segment, COUNT(*) AS event_count FROM events e JOIN users u ON e.user_id = u.user_id GROUP BY u.segment ORDER BY u.segment ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S021",
+    "category": "left_hash_join",
+    "file": "queries/S021.sql",
+    "description": "SELECT COUNT(c.campaign_id) AS matched_campaigns FROM events e LEFT JOIN campaigns c ON e.campaign_id = c.campaign_id",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S022",
+    "category": "multi_join",
+    "file": "queries/S022.sql",
+    "description": "SELECT u.region, c.channel, COUNT(*) AS event_count FROM events e JOIN users u ON e.user_id = u.user_id LEFT JOIN campaigns c ON e.campaign_id = c.campaign_id WHERE u.active = true GROUP BY u.region, c.channel ORDER BY event_count DESC LIMIT 20",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S023",
+    "category": "right_hash_join",
+    "file": "queries/S023.sql",
+    "description": "SELECT COUNT(*) FROM events e RIGHT JOIN campaigns c ON e.campaign_id = c.campaign_id",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S024",
+    "category": "full_hash_join",
+    "file": "queries/S024.sql",
+    "description": "SELECT COUNT(*) FROM campaigns c FULL JOIN events e ON c.campaign_id = e.campaign_id",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S025",
+    "category": "having",
+    "file": "queries/S025.sql",
+    "description": "SELECT u.segment, COUNT(*) AS event_count FROM events e JOIN users u ON e.user_id = u.user_id GROUP BY u.segment HAVING COUNT(*) > 1000 ORDER BY u.segment ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S026",
+    "category": "distinct",
+    "file": "queries/S026.sql",
+    "description": "SELECT DISTINCT country, device FROM events ORDER BY country ASC, device DESC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S027",
+    "category": "multi_order_nulls",
+    "file": "queries/S027.sql",
+    "description": "SELECT event_id, campaign_id FROM events WHERE event_id <= 1000 ORDER BY campaign_id ASC NULLS LAST, event_id DESC LIMIT 100",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S028",
+    "category": "offset",
+    "file": "queries/S028.sql",
+    "description": "SELECT event_id, score FROM events ORDER BY event_id ASC LIMIT 100 OFFSET 500",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S029",
+    "category": "window_row_number",
+    "file": "queries/S029.sql",
+    "description": "SELECT event_id, country, ROW_NUMBER() OVER (PARTITION BY country ORDER BY score DESC, event_id ASC) AS row_number FROM events WHERE event_id <= 100000 ORDER BY event_id ASC LIMIT 1000",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S030",
+    "category": "window_ranks",
+    "file": "queries/S030.sql",
+    "description": "SELECT event_id, RANK() OVER (PARTITION BY device ORDER BY duration_ms DESC) AS rank_value, DENSE_RANK() OVER (PARTITION BY device ORDER BY duration_ms DESC) AS dense_rank_value FROM events WHERE event_id <= 100000 ORDER BY event_id ASC LIMIT 1000",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S031",
+    "category": "window_lag_lead",
+    "file": "queries/S031.sql",
+    "description": "SELECT event_id, LAG(bytes, 1, 0) OVER (PARTITION BY user_id ORDER BY timestamp ASC) AS previous_bytes, LEAD(bytes, 1, 0) OVER (PARTITION BY user_id ORDER BY timestamp ASC) AS next_bytes FROM events WHERE event_id <= 100000 ORDER BY event_id ASC LIMIT 1000",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S032",
+    "category": "window_partition_aggregate",
+    "file": "queries/S032.sql",
+    "description": "SELECT event_id, COUNT(*) OVER (PARTITION BY country) AS country_events, AVG(score) OVER (PARTITION BY country) AS country_score FROM events WHERE event_id <= 100000 ORDER BY event_id ASC LIMIT 1000",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S033",
+    "category": "window_running_frame",
+    "file": "queries/S033.sql",
+    "description": "SELECT event_id, SUM(bytes) OVER (PARTITION BY country ORDER BY event_id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_bytes FROM events WHERE event_id <= 100000 ORDER BY event_id ASC LIMIT 1000",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S034",
+    "category": "union_all",
+    "file": "queries/S034.sql",
+    "description": "SELECT country AS value FROM events WHERE event_id <= 1000 UNION ALL SELECT region AS value FROM users WHERE user_id <= 1000",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S035",
+    "category": "union_distinct",
+    "file": "queries/S035.sql",
+    "description": "SELECT country AS value FROM events WHERE event_id <= 1000 UNION SELECT region AS value FROM users WHERE user_id <= 1000",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S036",
+    "category": "union_numeric",
+    "file": "queries/S036.sql",
+    "description": "SELECT campaign_id AS id FROM campaigns WHERE campaign_id <= 1000 UNION SELECT campaign_id AS id FROM events WHERE event_id <= 1000",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S037",
+    "category": "cte_aggregate",
+    "file": "queries/S037.sql",
+    "description": "WITH country_totals AS (SELECT country, SUM(bytes) AS total_bytes FROM events GROUP BY country) SELECT country, total_bytes FROM country_totals WHERE total_bytes > 0 ORDER BY country ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S038",
+    "category": "cte_filter_project",
+    "file": "queries/S038.sql",
+    "description": "WITH recent_events AS (SELECT event_id, country, score FROM events WHERE event_id <= 100000) SELECT event_id, country FROM recent_events WHERE score >= 99.0 ORDER BY event_id ASC LIMIT 1000",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S039",
+    "category": "cte_join_aggregate",
+    "file": "queries/S039.sql",
+    "description": "WITH segment_events AS (SELECT u.segment, COUNT(*) AS event_count FROM events e JOIN users u ON e.user_id = u.user_id GROUP BY u.segment) SELECT segment, event_count FROM segment_events WHERE event_count > 1000 ORDER BY segment ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S040",
+    "category": "multiple_ctes",
+    "file": "queries/S040.sql",
+    "description": "WITH country_totals AS (SELECT country, COUNT(*) AS total FROM events GROUP BY country), region_totals AS (SELECT region, COUNT(*) AS total FROM users GROUP BY region) SELECT region, total FROM region_totals ORDER BY region ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S041",
+    "category": "cte_outer_aggregate",
+    "file": "queries/S041.sql",
+    "description": "WITH high_scores AS (SELECT event_id, country FROM events WHERE score >= 90.0) SELECT country, COUNT(*) AS total FROM high_scores GROUP BY country HAVING COUNT(*) > 0 ORDER BY country ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S042",
+    "category": "scalar_subquery",
+    "file": "queries/S042.sql",
+    "description": "SELECT event_id, (SELECT MAX(budget) FROM campaigns) AS max_budget FROM events WHERE event_id <= 100 ORDER BY event_id ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S043",
+    "category": "exists_correlated",
+    "file": "queries/S043.sql",
+    "description": "SELECT event_id FROM events e WHERE event_id <= 1000 AND EXISTS (SELECT campaign_id FROM campaigns c WHERE c.campaign_id = e.campaign_id) ORDER BY event_id ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S044",
+    "category": "in_subquery",
+    "file": "queries/S044.sql",
+    "description": "SELECT event_id FROM events WHERE event_id <= 1000 AND campaign_id IN (SELECT campaign_id FROM campaigns) ORDER BY event_id ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S045",
+    "category": "correlated_scalar",
+    "file": "queries/S045.sql",
+    "description": "SELECT event_id, (SELECT MAX(budget) FROM campaigns c WHERE c.campaign_id = e.campaign_id) AS campaign_budget FROM events e WHERE event_id <= 1000 ORDER BY event_id ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S046",
+    "category": "not_exists_correlated",
+    "file": "queries/S046.sql",
+    "description": "SELECT event_id FROM events e WHERE event_id <= 1000 AND NOT EXISTS (SELECT campaign_id FROM campaigns c WHERE c.campaign_id = e.campaign_id) ORDER BY event_id ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S047",
+    "category": "date_timestamp_literals",
+    "file": "queries/S047.sql",
+    "description": "SELECT DATE '2024-02-29' AS leap_day, TIMESTAMP '2024-02-29T12:34:56Z' AS moment FROM events LIMIT 1",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S048",
+    "category": "extract_timestamp",
+    "file": "queries/S048.sql",
+    "description": "SELECT event_id, EXTRACT(year FROM timestamp) AS event_year, EXTRACT(month FROM timestamp) AS event_month FROM events WHERE event_id <= 1000 ORDER BY event_id ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S049",
+    "category": "date_trunc",
+    "file": "queries/S049.sql",
+    "description": "SELECT event_id, DATE_TRUNC('month', timestamp) AS event_month FROM events WHERE event_id <= 1000 ORDER BY event_id ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S050",
+    "category": "date_interval_arithmetic",
+    "file": "queries/S050.sql",
+    "description": "SELECT DATE '2024-01-31' + INTERVAL '2 days' AS shifted_date FROM events LIMIT 1",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S051",
+    "category": "decimal_cast",
+    "file": "queries/S051.sql",
+    "description": "SELECT user_id, CAST('123.456' AS DECIMAL(18,2)) AS rounded_decimal, CAST(lifetime_value AS DECIMAL(18,2)) AS value FROM users WHERE user_id <= 100 ORDER BY user_id ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S052",
+    "category": "date_column_extract",
+    "file": "queries/S052.sql",
+    "description": "SELECT user_id, EXTRACT(year FROM signup_date) AS signup_year FROM users WHERE user_id <= 100 ORDER BY user_id ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S053",
+    "category": "checked_overflow",
+    "file": "queries/S053.sql",
+    "description": "SELECT 9223372036854775807 + 1 AS overflow_value FROM events LIMIT 1",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S054",
+    "category": "derived_table",
+    "file": "queries/S054.sql",
+    "description": "SELECT d.country, d.total FROM (SELECT country, COUNT(*) AS total FROM events GROUP BY country) AS d WHERE d.total > 0 ORDER BY country ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S055",
+    "category": "chained_ctes",
+    "file": "queries/S055.sql",
+    "description": "WITH first_totals AS (SELECT country, COUNT(*) AS total FROM events GROUP BY country), filtered_totals AS (SELECT country, total FROM first_totals WHERE total > 0) SELECT country, total FROM filtered_totals ORDER BY country ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S056",
+    "category": "cte_to_cte_join",
+    "file": "queries/S056.sql",
+    "description": "WITH event_counts AS (SELECT country, COUNT(*) AS total FROM events GROUP BY country), event_bytes AS (SELECT country, SUM(bytes) AS total_bytes FROM events GROUP BY country) SELECT a.country, a.total, b.total_bytes FROM event_counts a JOIN event_bytes b ON a.country = b.country ORDER BY a.country ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S057",
+    "category": "derived_table_join",
+    "file": "queries/S057.sql",
+    "description": "SELECT a.country, a.total, b.total_bytes FROM (SELECT country, COUNT(*) AS total FROM events GROUP BY country) a JOIN (SELECT country, SUM(bytes) AS total_bytes FROM events GROUP BY country) b ON a.country = b.country ORDER BY a.country ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S058",
+    "category": "materialized_full_join",
+    "file": "queries/S058.sql",
+    "description": "WITH event_counts AS (SELECT country, COUNT(*) AS total FROM events GROUP BY country), region_counts AS (SELECT region, COUNT(*) AS total FROM users GROUP BY region) SELECT a.country, b.region FROM event_counts a FULL JOIN region_counts b ON a.country = b.region ORDER BY a.country ASC NULLS LAST, b.region ASC NULLS LAST",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S059",
+    "category": "cte_base_join",
+    "file": "queries/S059.sql",
+    "description": "WITH selected_campaigns AS (SELECT campaign_id FROM campaigns WHERE campaign_id <= 100) SELECT COUNT(*) FROM selected_campaigns s JOIN campaigns c ON s.campaign_id = c.campaign_id",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S060",
+    "category": "base_cte_left_join",
+    "file": "queries/S060.sql",
+    "description": "WITH selected_campaigns AS (SELECT campaign_id FROM campaigns WHERE campaign_id <= 100) SELECT COUNT(s.campaign_id) FROM campaigns c LEFT JOIN selected_campaigns s ON c.campaign_id = s.campaign_id",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S061",
+    "category": "exact_decimal_aggregate",
+    "file": "queries/S061.sql",
+    "description": "SELECT SUM(lifetime_value) AS total_value, MIN(lifetime_value) AS min_value, MAX(lifetime_value) AS max_value FROM users",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S062",
+    "category": "exact_decimal_arithmetic",
+    "file": "queries/S062.sql",
+    "description": "SELECT campaign_id, budget + CAST('0.05' AS DECIMAL(18,2)) AS adjusted_budget FROM campaigns WHERE campaign_id <= 100 ORDER BY campaign_id ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S063",
+    "category": "comma_cross_join",
+    "file": "queries/S063.sql",
+    "description": "SELECT COUNT(*) FROM (SELECT campaign_id FROM campaigns WHERE campaign_id <= 5) c, (SELECT user_id FROM users WHERE user_id <= 10) u",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S064",
+    "category": "explicit_cross_join",
+    "file": "queries/S064.sql",
+    "description": "SELECT COUNT(*) FROM (SELECT campaign_id FROM campaigns WHERE campaign_id <= 5) c CROSS JOIN (SELECT user_id FROM users WHERE user_id <= 10) u",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S065",
+    "category": "scalar_error_semantics",
+    "file": "queries/S065.sql",
+    "description": "SELECT ABS(-9223372036854775807) AS magnitude, 1 / 0 AS divide_by_zero, CAST('not-an-int' AS BIGINT) AS invalid_cast FROM events LIMIT 1",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S066",
+    "category": "numeric_widening",
+    "file": "queries/S066.sql",
+    "description": "SELECT campaign_id, budget + 1 AS decimal_plus_int, budget + 0.5 AS double_plus_decimal FROM campaigns WHERE campaign_id <= 100 ORDER BY campaign_id ASC",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S067",
+    "category": "window_min_max",
+    "file": "queries/S067.sql",
+    "description": "SELECT event_id, MIN(score) OVER (PARTITION BY country) AS country_min, MAX(score) OVER (PARTITION BY country) AS country_max FROM events WHERE event_id <= 100000 ORDER BY event_id ASC LIMIT 1000",
+    "feature_status": "implemented"
+  },
+  {
+    "query_id": "S068",
+    "category": "timestamp_interval_subtract",
+    "file": "queries/S068.sql",
+    "description": "SELECT TIMESTAMP '2024-02-29T12:34:56Z' - INTERVAL '90 seconds' AS shifted_timestamp FROM events LIMIT 1",
+    "feature_status": "implemented"
+  }
+]

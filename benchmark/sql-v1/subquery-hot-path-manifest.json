@@ -1,0 +1,32 @@
+[
+  {
+    "query_id": "S042",
+    "category": "scalar_subquery",
+    "file": "queries/S042.sql",
+    "description": "Uncorrelated scalar aggregate subquery"
+  },
+  {
+    "query_id": "S043",
+    "category": "exists_correlated",
+    "file": "queries/S043.sql",
+    "description": "Correlated EXISTS lookup"
+  },
+  {
+    "query_id": "S044",
+    "category": "in_subquery",
+    "file": "queries/S044.sql",
+    "description": "Uncorrelated IN membership subquery"
+  },
+  {
+    "query_id": "S045",
+    "category": "correlated_scalar",
+    "file": "queries/S045.sql",
+    "description": "Correlated scalar aggregate lookup"
+  },
+  {
+    "query_id": "S046",
+    "category": "not_exists_correlated",
+    "file": "queries/S046.sql",
+    "description": "Correlated NOT EXISTS lookup"
+  }
+]

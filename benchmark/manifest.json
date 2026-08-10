@@ -1,0 +1,386 @@
+[
+  {
+    "query_id": "Q001",
+    "category": "full_scan_aggregate",
+    "file": "queries/Q001.sql",
+    "description": "SELECT COUNT(*) FROM events"
+  },
+  {
+    "query_id": "Q002",
+    "category": "full_scan_aggregate",
+    "file": "queries/Q002.sql",
+    "description": "SELECT COUNT(user_id) FROM events"
+  },
+  {
+    "query_id": "Q003",
+    "category": "full_scan_aggregate",
+    "file": "queries/Q003.sql",
+    "description": "SELECT SUM(bytes) FROM events"
+  },
+  {
+    "query_id": "Q004",
+    "category": "full_scan_aggregate",
+    "file": "queries/Q004.sql",
+    "description": "SELECT AVG(duration_ms) FROM events"
+  },
+  {
+    "query_id": "Q005",
+    "category": "full_scan_aggregate",
+    "file": "queries/Q005.sql",
+    "description": "SELECT MIN(score) FROM events"
+  },
+  {
+    "query_id": "Q006",
+    "category": "full_scan_aggregate",
+    "file": "queries/Q006.sql",
+    "description": "SELECT MAX(score) FROM events"
+  },
+  {
+    "query_id": "Q007",
+    "category": "full_scan_aggregate",
+    "file": "queries/Q007.sql",
+    "description": "SELECT SUM(duration_ms) FROM events"
+  },
+  {
+    "query_id": "Q008",
+    "category": "full_scan_aggregate",
+    "file": "queries/Q008.sql",
+    "description": "SELECT AVG(score) FROM events"
+  },
+  {
+    "query_id": "Q009",
+    "category": "filtered_scan",
+    "file": "queries/Q009.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE success = true"
+  },
+  {
+    "query_id": "Q010",
+    "category": "filtered_scan",
+    "file": "queries/Q010.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE success = false"
+  },
+  {
+    "query_id": "Q011",
+    "category": "filtered_scan",
+    "file": "queries/Q011.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE duration_ms > 500"
+  },
+  {
+    "query_id": "Q012",
+    "category": "filtered_scan",
+    "file": "queries/Q012.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE bytes >= 500000"
+  },
+  {
+    "query_id": "Q013",
+    "category": "filtered_scan",
+    "file": "queries/Q013.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE score >= 75.0"
+  },
+  {
+    "query_id": "Q014",
+    "category": "filtered_scan",
+    "file": "queries/Q014.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE country = 'IN'"
+  },
+  {
+    "query_id": "Q015",
+    "category": "filtered_scan",
+    "file": "queries/Q015.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE event_type = 'purchase'"
+  },
+  {
+    "query_id": "Q016",
+    "category": "filtered_scan",
+    "file": "queries/Q016.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE device = 'mobile'"
+  },
+  {
+    "query_id": "Q017",
+    "category": "filtered_scan",
+    "file": "queries/Q017.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE country = 'US' AND success = true"
+  },
+  {
+    "query_id": "Q018",
+    "category": "filtered_scan",
+    "file": "queries/Q018.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE duration_ms < 100 OR bytes > 900000"
+  },
+  {
+    "query_id": "Q019",
+    "category": "projection_filter",
+    "file": "queries/Q019.sql",
+    "description": "SELECT event_id, user_id, country FROM events WHERE country = 'IN' AND success = true LIMIT 1000"
+  },
+  {
+    "query_id": "Q020",
+    "category": "projection_filter",
+    "file": "queries/Q020.sql",
+    "description": "SELECT event_id, device, duration_ms FROM events WHERE duration_ms > 9000 LIMIT 1000"
+  },
+  {
+    "query_id": "Q021",
+    "category": "projection_filter",
+    "file": "queries/Q021.sql",
+    "description": "SELECT event_id, event_type, bytes FROM events WHERE event_type = 'download' AND bytes > 500000 LIMIT 1000"
+  },
+  {
+    "query_id": "Q022",
+    "category": "projection_filter",
+    "file": "queries/Q022.sql",
+    "description": "SELECT user_id, score, success FROM events WHERE score > 95.0 LIMIT 1000"
+  },
+  {
+    "query_id": "Q023",
+    "category": "projection_filter",
+    "file": "queries/Q023.sql",
+    "description": "SELECT event_id, campaign_id FROM events WHERE campaign_id IS NOT NULL LIMIT 1000"
+  },
+  {
+    "query_id": "Q024",
+    "category": "projection_filter",
+    "file": "queries/Q024.sql",
+    "description": "SELECT event_id, duration_ms * 2 AS doubled_duration FROM events WHERE country = 'JP' LIMIT 1000"
+  },
+  {
+    "query_id": "Q025",
+    "category": "projection_filter",
+    "file": "queries/Q025.sql",
+    "description": "SELECT event_id, bytes + duration_ms AS combined_metric FROM events WHERE device = 'desktop' LIMIT 1000"
+  },
+  {
+    "query_id": "Q026",
+    "category": "projection_filter",
+    "file": "queries/Q026.sql",
+    "description": "SELECT event_id, score * 1.5 AS weighted_score FROM events WHERE success = true AND country = 'DE' LIMIT 1000"
+  },
+  {
+    "query_id": "Q027",
+    "category": "single_group_by",
+    "file": "queries/Q027.sql",
+    "description": "SELECT country, COUNT(*) AS cnt FROM events GROUP BY country"
+  },
+  {
+    "query_id": "Q028",
+    "category": "single_group_by",
+    "file": "queries/Q028.sql",
+    "description": "SELECT device, COUNT(*) AS cnt FROM events GROUP BY device"
+  },
+  {
+    "query_id": "Q029",
+    "category": "single_group_by",
+    "file": "queries/Q029.sql",
+    "description": "SELECT event_type, COUNT(*) AS cnt FROM events GROUP BY event_type"
+  },
+  {
+    "query_id": "Q030",
+    "category": "single_group_by",
+    "file": "queries/Q030.sql",
+    "description": "SELECT country, SUM(bytes) AS total_bytes FROM events GROUP BY country"
+  },
+  {
+    "query_id": "Q031",
+    "category": "single_group_by",
+    "file": "queries/Q031.sql",
+    "description": "SELECT country, AVG(duration_ms) AS avg_duration FROM events GROUP BY country"
+  },
+  {
+    "query_id": "Q032",
+    "category": "single_group_by",
+    "file": "queries/Q032.sql",
+    "description": "SELECT device, AVG(score) AS avg_score FROM events GROUP BY device"
+  },
+  {
+    "query_id": "Q033",
+    "category": "single_group_by",
+    "file": "queries/Q033.sql",
+    "description": "SELECT event_type, SUM(bytes) AS total_bytes FROM events GROUP BY event_type"
+  },
+  {
+    "query_id": "Q034",
+    "category": "single_group_by",
+    "file": "queries/Q034.sql",
+    "description": "SELECT success, COUNT(*) AS cnt FROM events GROUP BY success"
+  },
+  {
+    "query_id": "Q035",
+    "category": "single_group_by",
+    "file": "queries/Q035.sql",
+    "description": "SELECT country, MAX(score) AS max_score FROM events GROUP BY country"
+  },
+  {
+    "query_id": "Q036",
+    "category": "single_group_by",
+    "file": "queries/Q036.sql",
+    "description": "SELECT country, MIN(duration_ms) AS min_duration FROM events GROUP BY country"
+  },
+  {
+    "query_id": "Q037",
+    "category": "single_group_by",
+    "file": "queries/Q037.sql",
+    "description": "SELECT device, SUM(duration_ms) AS total_duration FROM events GROUP BY device"
+  },
+  {
+    "query_id": "Q038",
+    "category": "single_group_by",
+    "file": "queries/Q038.sql",
+    "description": "SELECT event_type, AVG(score) AS avg_score FROM events GROUP BY event_type"
+  },
+  {
+    "query_id": "Q039",
+    "category": "multi_group_by",
+    "file": "queries/Q039.sql",
+    "description": "SELECT country, device, COUNT(*) AS cnt FROM events GROUP BY country, device"
+  },
+  {
+    "query_id": "Q040",
+    "category": "multi_group_by",
+    "file": "queries/Q040.sql",
+    "description": "SELECT country, event_type, COUNT(*) AS cnt FROM events GROUP BY country, event_type"
+  },
+  {
+    "query_id": "Q041",
+    "category": "multi_group_by",
+    "file": "queries/Q041.sql",
+    "description": "SELECT device, event_type, COUNT(*) AS cnt FROM events GROUP BY device, event_type"
+  },
+  {
+    "query_id": "Q042",
+    "category": "multi_group_by",
+    "file": "queries/Q042.sql",
+    "description": "SELECT country, success, COUNT(*) AS cnt FROM events GROUP BY country, success"
+  },
+  {
+    "query_id": "Q043",
+    "category": "multi_group_by",
+    "file": "queries/Q043.sql",
+    "description": "SELECT country, device, SUM(bytes) AS total_bytes FROM events GROUP BY country, device"
+  },
+  {
+    "query_id": "Q044",
+    "category": "multi_group_by",
+    "file": "queries/Q044.sql",
+    "description": "SELECT country, event_type, AVG(duration_ms) AS avg_duration FROM events GROUP BY country, event_type"
+  },
+  {
+    "query_id": "Q045",
+    "category": "multi_group_by",
+    "file": "queries/Q045.sql",
+    "description": "SELECT device, success, AVG(score) AS avg_score FROM events GROUP BY device, success"
+  },
+  {
+    "query_id": "Q046",
+    "category": "multi_group_by",
+    "file": "queries/Q046.sql",
+    "description": "SELECT country, device, event_type, COUNT(*) AS cnt FROM events GROUP BY country, device, event_type"
+  },
+  {
+    "query_id": "Q047",
+    "category": "aggregate_heavy",
+    "file": "queries/Q047.sql",
+    "description": "SELECT country, COUNT(*) AS cnt, SUM(bytes) AS total_bytes, AVG(duration_ms) AS avg_duration, MIN(score) AS min_score, MAX(score) AS max_score FROM events GROUP BY country"
+  },
+  {
+    "query_id": "Q048",
+    "category": "aggregate_heavy",
+    "file": "queries/Q048.sql",
+    "description": "SELECT event_type, COUNT(*) AS cnt, SUM(bytes) AS total_bytes, SUM(duration_ms) AS total_duration, AVG(score) AS avg_score FROM events GROUP BY event_type"
+  },
+  {
+    "query_id": "Q049",
+    "category": "aggregate_heavy",
+    "file": "queries/Q049.sql",
+    "description": "SELECT device, COUNT(*) AS cnt, AVG(bytes) AS avg_bytes, MIN(duration_ms) AS min_duration, MAX(duration_ms) AS max_duration FROM events GROUP BY device"
+  },
+  {
+    "query_id": "Q050",
+    "category": "aggregate_heavy",
+    "file": "queries/Q050.sql",
+    "description": "SELECT country, COUNT(*) AS cnt, SUM(bytes) AS total_bytes, AVG(score) AS avg_score FROM events WHERE success = true GROUP BY country"
+  },
+  {
+    "query_id": "Q051",
+    "category": "aggregate_heavy",
+    "file": "queries/Q051.sql",
+    "description": "SELECT event_type, COUNT(*) AS cnt, SUM(bytes) AS total_bytes, AVG(duration_ms) AS avg_duration FROM events WHERE duration_ms > 1000 GROUP BY event_type"
+  },
+  {
+    "query_id": "Q052",
+    "category": "aggregate_heavy",
+    "file": "queries/Q052.sql",
+    "description": "SELECT device, COUNT(*) AS cnt, SUM(duration_ms) AS total_duration, MAX(score) AS max_score FROM events WHERE score > 50.0 GROUP BY device"
+  },
+  {
+    "query_id": "Q053",
+    "category": "definition_levels",
+    "file": "queries/Q053.sql",
+    "description": "SELECT COUNT(campaign_id) FROM events"
+  },
+  {
+    "query_id": "Q054",
+    "category": "definition_levels",
+    "file": "queries/Q054.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE campaign_id IS NULL"
+  },
+  {
+    "query_id": "Q055",
+    "category": "definition_levels",
+    "file": "queries/Q055.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE campaign_id IS NOT NULL"
+  },
+  {
+    "query_id": "Q056",
+    "category": "definition_levels",
+    "file": "queries/Q056.sql",
+    "description": "SELECT SUM(campaign_id) FROM events WHERE campaign_id IS NOT NULL"
+  },
+  {
+    "query_id": "Q057",
+    "category": "order_by",
+    "file": "queries/Q057.sql",
+    "description": "SELECT country, COUNT(*) AS cnt FROM events GROUP BY country ORDER BY country ASC"
+  },
+  {
+    "query_id": "Q058",
+    "category": "order_by",
+    "file": "queries/Q058.sql",
+    "description": "SELECT event_type, SUM(bytes) AS total_bytes FROM events GROUP BY event_type ORDER BY total_bytes DESC"
+  },
+  {
+    "query_id": "Q059",
+    "category": "order_by",
+    "file": "queries/Q059.sql",
+    "description": "SELECT device, AVG(duration_ms) AS avg_duration FROM events GROUP BY device ORDER BY avg_duration ASC"
+  },
+  {
+    "query_id": "Q060",
+    "category": "order_by",
+    "file": "queries/Q060.sql",
+    "description": "SELECT country, MAX(score) AS max_score FROM events GROUP BY country ORDER BY max_score DESC"
+  },
+  {
+    "query_id": "Q061",
+    "category": "order_by_limit",
+    "file": "queries/Q061.sql",
+    "description": "SELECT country, SUM(bytes) AS total_bytes FROM events GROUP BY country ORDER BY total_bytes DESC LIMIT 5"
+  },
+  {
+    "query_id": "Q062",
+    "category": "order_by_limit",
+    "file": "queries/Q062.sql",
+    "description": "SELECT event_type, COUNT(*) AS cnt FROM events GROUP BY event_type ORDER BY cnt DESC LIMIT 5"
+  },
+  {
+    "query_id": "Q063",
+    "category": "order_by_limit",
+    "file": "queries/Q063.sql",
+    "description": "SELECT country, device, COUNT(*) AS cnt FROM events GROUP BY country, device ORDER BY cnt DESC LIMIT 10"
+  },
+  {
+    "query_id": "Q064",
+    "category": "order_by_limit",
+    "file": "queries/Q064.sql",
+    "description": "SELECT country, event_type, AVG(duration_ms) AS avg_duration FROM events GROUP BY country, event_type ORDER BY avg_duration DESC LIMIT 10"
+  }
+]

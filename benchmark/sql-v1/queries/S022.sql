@@ -1,0 +1,1 @@
+SELECT u.region, c.channel, COUNT(*) AS event_count FROM events e JOIN users u ON e.user_id = u.user_id LEFT JOIN campaigns c ON e.campaign_id = c.campaign_id WHERE u.active = true GROUP BY u.region, c.channel ORDER BY event_count DESC LIMIT 20;

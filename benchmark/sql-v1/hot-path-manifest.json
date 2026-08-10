@@ -1,0 +1,50 @@
+[
+  {
+    "query_id": "S020",
+    "category": "join_group",
+    "file": "queries/S020.sql",
+    "description": "Join followed by grouped aggregation"
+  },
+  {
+    "query_id": "S022",
+    "category": "multi_join",
+    "file": "queries/S022.sql",
+    "description": "Multi-join followed by grouped aggregation"
+  },
+  {
+    "query_id": "S031",
+    "category": "window_lag_lead",
+    "file": "queries/S031.sql",
+    "description": "Partitioned LAG and LEAD window functions"
+  },
+  {
+    "query_id": "S032",
+    "category": "window_partition_aggregate",
+    "file": "queries/S032.sql",
+    "description": "Partitioned aggregate window functions"
+  },
+  {
+    "query_id": "S039",
+    "category": "cte_join_aggregate",
+    "file": "queries/S039.sql",
+    "description": "CTE containing a join and aggregation"
+  },
+  {
+    "query_id": "S056",
+    "category": "cte_to_cte_join",
+    "file": "queries/S056.sql",
+    "description": "Join between two materialized CTEs"
+  },
+  {
+    "query_id": "S057",
+    "category": "derived_table_join",
+    "file": "queries/S057.sql",
+    "description": "Join between two derived tables"
+  },
+  {
+    "query_id": "S067",
+    "category": "window_min_max",
+    "file": "queries/S067.sql",
+    "description": "Partitioned MIN and MAX window functions"
+  }
+]
