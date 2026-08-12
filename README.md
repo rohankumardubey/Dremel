@@ -14,10 +14,10 @@ It is an independent implementation and is not Google Dremel or BigQuery.
 | Area | Implementation |
 | --- | --- |
 | Engines | Rust 1.97.1 (Rust 2024) and LLVM Clang 22.1.8 (C++26) |
-| Storage | DREMCOL1, Apache Arrow IPC, and Apache Parquet with Snappy or Zstd |
+| Storage | DREMCOL1, Arrow IPC, and direct Apache Parquet projection with row-group pruning |
 | Execution | Batched scans, selection vectors, partitioned aggregation, joins and windows |
 | Optimizer | Scan filters, transitive predicates, pruning, contradiction elimination, selectivity-aware join ordering and Top-K |
-| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer and 5 concurrency cases |
+| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer, 9 Parquet and 5 concurrency cases |
 | Validation | Cross-engine typed results, SQLite differential tests and plan assertions |
 
 The toolchains are pinned so a later compiler update does not silently change
@@ -80,7 +80,8 @@ NATIVE=1 \
 ./benchmark.sh
 ```
 
-`EXTENDED`, `SQL_V1`, `OPTIMIZER`, `CONCURRENCY`, and `STORAGE` default to `1`.
+`EXTENDED`, `SQL_V1`, `OPTIMIZER`, `CONCURRENCY`, `STORAGE`, and
+`PARQUET_DIRECT` default to `1`.
 Set any of them to `0` to skip that suite. The storage suite verifies equal
 typed results and benchmarks full-file load plus in-memory execution for
 DREMCOL1, Arrow IPC, Parquet Snappy, and Parquet Zstd. On Linux,
@@ -107,6 +108,16 @@ Use an interoperable file by changing `--data` in either command:
 --data data/events.arrow
 --data data/events-snappy.parquet
 --data data/events-zstd.parquet
+```
+
+Add `--direct-parquet` when using a Parquet file to defer decoding until query
+execution. The scan reads only referenced columns and skips row groups whose
+official Parquet min/max/null statistics cannot satisfy supported predicates:
+
+```bash
+./dremel-rs/target/release/dremel-rs query \
+  --data data/events-snappy.parquet --direct-parquet \
+  --sql "SELECT SUM(bytes) FROM events WHERE event_id <= 100000" --stats
 ```
 
 `users` and `campaigns` are loaded from matching Arrow or Parquet files when a
@@ -163,11 +174,12 @@ CI runs the same checks on macOS with the pinned toolchains. The `Dockerfile`
 provides a Linux correctness environment; do not mix Docker measurements with
 native host measurements.
 
-The current Arrow and Parquet path decodes the full file into the engine's
-in-memory columns. Scan-side predicates reduce execution intermediates after
-load; Parquet row-group pruning remains future work. Distributed exchange,
-durable spill/recovery, transactions, and database wire protocols are also
-outside the current scope.
+The default Arrow and Parquet path remains an eager full-file control. Direct
+Parquet mode performs query-time column projection and row-group pruning, then
+decodes selected row groups into the existing in-memory execution operators.
+Page-index pruning and a fully streaming Parquet-to-operator pipeline remain
+future work. Distributed exchange, durable spill/recovery, transactions, and
+database wire protocols are also outside the current scope.
 
 The main benchmark also runs `benchmark/memory/manifest.json` with a 256 MiB
 query workspace cap. Set `MEMORY_BOUNDED=0` to skip that suite or change the

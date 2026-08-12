@@ -1,0 +1,74 @@
+[
+  {
+    "query_id": "P001",
+    "category": "metadata_count",
+    "file": "queries/P001.sql",
+    "description": "SELECT COUNT(*) FROM events",
+    "expected_columns_read": 0,
+    "maximum_row_groups_read": 16
+  },
+  {
+    "query_id": "P002",
+    "category": "leading_row_groups",
+    "file": "queries/P002.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE event_id <= 100000",
+    "expected_columns_read": 1,
+    "maximum_row_groups_read": 2
+  },
+  {
+    "query_id": "P003",
+    "category": "projected_selective_aggregate",
+    "file": "queries/P003.sql",
+    "description": "SELECT SUM(bytes) FROM events WHERE event_id BETWEEN 200000 AND 260000",
+    "expected_columns_read": 2,
+    "maximum_row_groups_read": 2
+  },
+  {
+    "query_id": "P004",
+    "category": "dictionary_projection",
+    "file": "queries/P004.sql",
+    "description": "SELECT country, COUNT(*) FROM events WHERE country = 'IN' GROUP BY country",
+    "expected_columns_read": 1,
+    "maximum_row_groups_read": 16
+  },
+  {
+    "query_id": "P005",
+    "category": "late_row_groups",
+    "file": "queries/P005.sql",
+    "description": "SELECT AVG(score) FROM events WHERE event_id >= 900000 AND event_id < 920000",
+    "expected_columns_read": 2,
+    "maximum_row_groups_read": 2
+  },
+  {
+    "query_id": "P006",
+    "category": "nullable_projection",
+    "file": "queries/P006.sql",
+    "description": "SELECT COUNT(campaign_id) FROM events WHERE campaign_id IS NULL",
+    "expected_columns_read": 1,
+    "maximum_row_groups_read": 16
+  },
+  {
+    "query_id": "P007",
+    "category": "wide_projection",
+    "file": "queries/P007.sql",
+    "description": "SELECT SUM(bytes), AVG(score), MIN(duration_ms), MAX(timestamp), COUNT(campaign_id) FROM events WHERE event_id <= 100000",
+    "expected_columns_read": 6,
+    "maximum_row_groups_read": 2
+  },
+  {
+    "query_id": "P008",
+    "category": "dimension_join",
+    "file": "queries/P008.sql",
+    "description": "SELECT u.segment, COUNT(*) FROM events e JOIN users u ON e.user_id = u.user_id WHERE e.event_id <= 100000 GROUP BY u.segment ORDER BY u.segment",
+    "expected_columns_read": 2,
+    "maximum_row_groups_read": 2
+  },
+  {
+    "query_id": "P009",
+    "category": "window_scan",
+    "file": "queries/P009.sql",
+    "description": "SELECT event_id, ROW_NUMBER() OVER (PARTITION BY country ORDER BY score DESC, event_id ASC) FROM events WHERE event_id <= 500 ORDER BY event_id",
+    "expected_columns_read": 3,
+    "maximum_row_groups_read": 1
+  }
+]

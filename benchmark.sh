@@ -21,6 +21,7 @@ OPTIMIZER="${OPTIMIZER:-1}"
 CONCURRENCY="${CONCURRENCY:-1}"
 STORAGE="${STORAGE:-1}"
 MEMORY_BOUNDED="${MEMORY_BOUNDED:-1}"
+PARQUET_DIRECT="${PARQUET_DIRECT:-1}"
 QUERY_MEMORY_LIMIT_MB="${QUERY_MEMORY_LIMIT_MB:-256}"
 export LTO NATIVE BENCH_CPUSET CPP_STANDARD
 
@@ -41,6 +42,7 @@ mkdir -p results
 "$PYTHON" scripts/create_extended_workload.py
 "$PYTHON" scripts/create_sql_v1_workload.py
 "$PYTHON" scripts/create_optimizer_workload.py
+"$PYTHON" scripts/create_parquet_workload.py
 "$PYTHON" scripts/create_concurrency_workload.py
 "$PYTHON" scripts/generate_data.py --rows "$DATASET_ROWS" --seed "$DATASET_SEED"
 "$PYTHON" scripts/build_column_store.py
@@ -156,6 +158,13 @@ if [[ "$STORAGE" == 1 ]]; then
       --results-dir "results/storage/$storage_name"
   done
   "$PYTHON" scripts/summarize_storage_benchmark.py
+fi
+
+if [[ "$PARQUET_DIRECT" == 1 ]]; then
+  "$PYTHON" scripts/run_parquet_benchmark.py \
+    --data data/events-snappy.parquet --threads "$BENCH_THREADS" \
+    --batch-size "$BATCH_SIZE" --warmup "$WARMUP" \
+    --iterations "$ITERATIONS"
 fi
 
 if [[ "$MEMORY_BOUNDED" == 1 ]]; then

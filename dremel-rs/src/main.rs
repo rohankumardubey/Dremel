@@ -19,6 +19,7 @@ fn real_main() -> Result<(), String> {
     let command = args.get(1).map(String::as_str).unwrap_or("help");
     let options = Options {
         data: value(&args, "--data", "data/events.csv"),
+        direct_parquet: args.iter().any(|arg| arg == "--direct-parquet"),
         threads: value(&args, "--threads", "4")
             .parse()
             .map_err(|_| "invalid --threads")?,
@@ -57,7 +58,7 @@ fn real_main() -> Result<(), String> {
         }
         _ => {
             println!(
-                "dremel-rs query|bench-server --data PATH --threads N --batch-size N [--query-memory-limit-mb N] [--sql SQL] [--explain]"
+                "dremel-rs query|bench-server --data PATH --threads N --batch-size N [--direct-parquet] [--query-memory-limit-mb N] [--sql SQL] [--explain]"
             );
             Ok(())
         }

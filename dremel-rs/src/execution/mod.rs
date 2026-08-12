@@ -211,24 +211,54 @@ pub(crate) fn is_relational(query: &Query) -> bool {
 }
 
 pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<(), String> {
-    let t = Arc::new(Table::load(&o.data)?);
+    if o.direct_parquet && !o.data.ends_with(".parquet") {
+        return Err("--direct-parquet requires a .parquet data file".into());
+    }
+    let t = Arc::new(if o.direct_parquet {
+        Table::parquet_metadata(&o.data)?
+    } else {
+        Table::load(&o.data)?
+    });
     enforce_table_limit(&o, &t)?;
-    let q = prepare(Parser::new(sql)?.parse()?, &t);
+    let mut q = prepare(Parser::new(sql)?.parse()?, &t);
     if q.ctes.is_empty() {
         bind_query(&q)?;
     }
     enforce_result_limit(&o, &q, &t)?;
+    if o.direct_parquet {
+        let scan = Table::parquet_scan_plan(&o.data, &q)?;
+        q.physical.insert(
+            1,
+            format!(
+                "ParquetScanExec(columns={}/{};row_groups={}/{};rows={}/{};compressed_bytes={})",
+                scan.columns_read,
+                scan.total_columns,
+                scan.row_groups_read,
+                scan.total_row_groups,
+                scan.rows_read,
+                scan.total_rows,
+                scan.compressed_bytes_read
+            ),
+        );
+    }
     if explain {
         println!("{}", q.explain(o.batch_size));
         return Ok(());
     }
     let pool = Pool::new(o.threads);
     let started = Instant::now();
+    let (execution_table, scan) = if o.direct_parquet {
+        let (table, scan) = Table::load_parquet_direct(&o.data, &q, o.batch_size)?;
+        (Arc::new(table), scan)
+    } else {
+        (t.clone(), ParquetScanMetrics::default())
+    };
+    enforce_table_limit(&o, &execution_table)?;
     let (rows, query_memory) = with_query_memory(o.query_memory_limit_mb, || {
         if is_relational(&q) {
-            execute_rel(&q, &Catalog::load(&o.data, t.clone())?)
+            execute_rel(&q, &Catalog::load(&o.data, execution_table.clone())?)
         } else {
-            execute(&q, t.clone(), &pool, o.batch_size)
+            execute(&q, execution_table.clone(), &pool, o.batch_size)
         }
     });
     let rows = rows?;
@@ -244,16 +274,23 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
     }
     if stats {
         eprintln!(
-            "{{\"rows_scanned\":{},\"rows_returned\":{},\"batches_scanned\":{},\"columns_scanned\":{},\"worker_threads\":{},\"logical_partitions\":{},\"elapsed_ns\":{},\"query_memory_limit_bytes\":{},\"query_memory_accounted_bytes\":{}}}",
-            t.len(),
+            "{{\"rows_scanned\":{},\"rows_returned\":{},\"batches_scanned\":{},\"columns_scanned\":{},\"worker_threads\":{},\"logical_partitions\":{},\"elapsed_ns\":{},\"query_memory_limit_bytes\":{},\"query_memory_accounted_bytes\":{},\"parquet_total_rows\":{},\"parquet_rows_read\":{},\"parquet_total_row_groups\":{},\"parquet_row_groups_read\":{},\"parquet_total_columns\":{},\"parquet_columns_read\":{},\"parquet_compressed_bytes_read\":{}}}",
+            execution_table.len(),
             rows.len(),
-            t.len().div_ceil(o.batch_size),
+            execution_table.len().div_ceil(o.batch_size),
             q.columns.len(),
             o.threads,
             o.threads * 4,
             elapsed_ns,
             query_memory.limit_bytes(),
-            query_memory.accounted_bytes()
+            query_memory.accounted_bytes(),
+            scan.total_rows,
+            scan.rows_read,
+            scan.total_row_groups,
+            scan.row_groups_read,
+            scan.total_columns,
+            scan.columns_read,
+            scan.compressed_bytes_read
         );
     }
     Ok(())

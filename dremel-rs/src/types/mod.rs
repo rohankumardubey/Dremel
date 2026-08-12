@@ -10,6 +10,7 @@ use std::time::Instant;
 #[derive(Clone)]
 pub struct Options {
     pub data: String,
+    pub direct_parquet: bool,
     pub threads: usize,
     pub batch_size: usize,
     pub memory_limit_mb: usize,

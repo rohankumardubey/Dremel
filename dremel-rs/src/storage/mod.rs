@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 mod interoperable;
+pub(crate) use interoperable::ParquetScanMetrics;
 
 #[derive(Default)]
 pub(crate) struct Dictionary {
@@ -73,6 +74,7 @@ pub(crate) fn read_dictionary<R: Read>(
     Ok((d, read_u32s(r, rows)?))
 }
 pub struct Table {
+    pub(crate) logical_rows: usize,
     pub(crate) event_id: Vec<i64>,
     pub(crate) user_id: Vec<i64>,
     pub(crate) timestamp: Vec<i64>,
@@ -701,6 +703,22 @@ pub(crate) fn relation_scalar(catalog: &Catalog, row: RelRow, table: &str, colum
     }
 }
 impl Table {
+    pub(crate) fn parquet_metadata(path: &str) -> Result<Self, String> {
+        interoperable::parquet_metadata_table(path)
+    }
+    pub(crate) fn load_parquet_direct(
+        path: &str,
+        query: &Query,
+        batch_size: usize,
+    ) -> Result<(Self, ParquetScanMetrics), String> {
+        interoperable::load_parquet_direct(path, query, batch_size)
+    }
+    pub(crate) fn parquet_scan_plan(
+        path: &str,
+        query: &Query,
+    ) -> Result<ParquetScanMetrics, String> {
+        interoperable::parquet_scan_plan(path, query)
+    }
     pub fn load(path: &str) -> Result<Self, String> {
         if path.ends_with(".dremel") {
             Self::load_binary(path)
@@ -714,6 +732,7 @@ impl Table {
     }
     pub(crate) fn empty() -> Self {
         Self {
+            logical_rows: 0,
             event_id: vec![],
             user_id: vec![],
             timestamp: vec![],
@@ -793,10 +812,24 @@ impl Table {
         Ok(t)
     }
     pub(crate) fn len(&self) -> usize {
-        self.event_id.len()
+        if self.event_id.is_empty() {
+            self.logical_rows
+        } else {
+            self.event_id.len()
+        }
     }
     pub(crate) fn approximate_bytes(&self) -> usize {
-        self.len() * (6 * 8 + 3 * 4 + 8 + 2)
+        (self.event_id.len()
+            + self.user_id.len()
+            + self.timestamp.len()
+            + self.duration.len()
+            + self.bytes.len()
+            + self.campaign.len())
+            * 8
+            + (self.country.len() + self.device.len() + self.event_type.len()) * 4
+            + self.score.len() * 8
+            + self.success.len()
+            + self.campaign_def.len()
             + self
                 .country_dict
                 .values
@@ -810,9 +843,9 @@ impl Table {
         columns
             .iter()
             .map(|column| match column.rsplit('.').next().unwrap_or(column) {
-                "country" => self.country_dict.values.len(),
-                "device" => self.device_dict.values.len(),
-                "event_type" => self.event_dict.values.len(),
+                "country" if !self.country_dict.values.is_empty() => self.country_dict.values.len(),
+                "device" if !self.device_dict.values.is_empty() => self.device_dict.values.len(),
+                "event_type" if !self.event_dict.values.is_empty() => self.event_dict.values.len(),
                 "success" => 2,
                 _ => self.len(),
             })

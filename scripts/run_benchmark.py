@@ -55,6 +55,15 @@ class Server:
     ):
         self.name = name
         self.last_query_memory = {"limit_bytes": 0, "accounted_bytes": 0}
+        self.last_scan_metrics = {
+            "total_rows": 0,
+            "rows_read": 0,
+            "total_row_groups": 0,
+            "row_groups_read": 0,
+            "total_columns": 0,
+            "columns_read": 0,
+            "compressed_bytes_read": 0,
+        }
         self.process = subprocess.Popen(
             command,
             cwd=ROOT,
@@ -105,6 +114,21 @@ class Server:
                 "limit_bytes": int(p[4]),
                 "accounted_bytes": int(p[5]),
             }
+        if len(p) >= 13:
+            self.last_scan_metrics = dict(
+                zip(
+                    (
+                        "total_rows",
+                        "rows_read",
+                        "total_row_groups",
+                        "row_groups_read",
+                        "total_columns",
+                        "columns_read",
+                        "compressed_bytes_read",
+                    ),
+                    map(int, p[6:13]),
+                )
+            )
         return int(p[1]), json.loads(p[3])
 
     def e2e(self, qid: str, sql: str) -> int:

@@ -50,27 +50,37 @@ read_dictionary(std::istream &in, std::size_t rows) {
   return {std::move(dictionary), read_vector<std::uint32_t>(in, rows)};
 }
 struct Table {
+  std::size_t logical_rows{};
   std::vector<std::int64_t> event_id, user_id, timestamp, duration, bytes,
       campaign;
   std::vector<double> score;
   std::vector<std::uint32_t> country, device, event_type;
   std::vector<std::uint8_t> success, campaign_def;
   Dictionary country_dict, device_dict, event_dict;
-  std::size_t size() const { return event_id.size(); }
+  std::size_t size() const {
+    return event_id.empty() ? logical_rows : event_id.size();
+  }
   std::size_t approximate_bytes() const {
     std::size_t strings = 0;
     for (auto *d : {&country_dict, &device_dict, &event_dict})
       for (auto &v : d->values)
         strings += v.size();
-    return size() * (6 * 8 + 3 * 4 + 8 + 2) + strings;
+    return (event_id.size() + user_id.size() + timestamp.size() +
+            duration.size() + bytes.size() + campaign.size()) *
+               8 +
+           (country.size() + device.size() + event_type.size()) * 4 +
+           score.size() * 8 + success.size() + campaign_def.size() + strings;
   }
   std::size_t group_upper_bound(const std::vector<std::string> &columns) const {
     std::size_t bound = 1;
     for (auto &qualified : columns) {
       const auto c = base_name(qualified);
-      std::size_t n = c == "country"      ? country_dict.values.size()
-                      : c == "device"     ? device_dict.values.size()
-                      : c == "event_type" ? event_dict.values.size()
+      std::size_t n = c == "country" && !country_dict.values.empty()
+                          ? country_dict.values.size()
+                      : c == "device" && !device_dict.values.empty()
+                          ? device_dict.values.size()
+                      : c == "event_type" && !event_dict.values.empty()
+                          ? event_dict.values.size()
                       : c == "success"    ? 2
                                           : size();
       bound = std::min(size(), bound > size() / std::max<std::size_t>(1, n)

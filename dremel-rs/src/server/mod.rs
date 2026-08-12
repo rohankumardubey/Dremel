@@ -412,8 +412,15 @@ impl Drop for AsyncScheduler {
 }
 
 pub fn run_bench_server(o: Options) -> Result<(), String> {
+    if o.direct_parquet && !o.data.ends_with(".parquet") {
+        return Err("--direct-parquet requires a .parquet data file".into());
+    }
     let load = Instant::now();
-    let table = Arc::new(Table::load(&o.data)?);
+    let table = Arc::new(if o.direct_parquet {
+        Table::parquet_metadata(&o.data)?
+    } else {
+        Table::load(&o.data)?
+    });
     enforce_table_limit(&o, &table)?;
     let load_ns = load.elapsed().as_nanos();
     let pool = Pool::new(o.threads);
@@ -434,7 +441,7 @@ pub fn run_bench_server(o: Options) -> Result<(), String> {
                 table.len()
             ),
             "PREPARE" => {
-                let q = prepare(
+                let mut q = prepare(
                     Parser::new(p.get(2).ok_or("missing sql")?)?.parse()?,
                     &table,
                 );
@@ -442,26 +449,55 @@ pub fn run_bench_server(o: Options) -> Result<(), String> {
                     bind_query(&q)?;
                 }
                 enforce_result_limit(&o, &q, &table)?;
+                if o.direct_parquet {
+                    let scan = Table::parquet_scan_plan(&o.data, &q)?;
+                    q.physical.insert(
+                        1,
+                        format!(
+                            "ParquetScanExec(columns={}/{};row_groups={}/{};rows={}/{};compressed_bytes={})",
+                            scan.columns_read,
+                            scan.total_columns,
+                            scan.row_groups_read,
+                            scan.total_row_groups,
+                            scan.rows_read,
+                            scan.total_rows,
+                            scan.compressed_bytes_read
+                        ),
+                    );
+                }
                 prepared.insert(p[1].into(), q);
                 println!("OK\t{}", p[1])
             }
             "EXEC" => {
                 let q = prepared.get(p[1]).ok_or("unknown query")?;
                 let now = Instant::now();
+                let (execution_table, scan) = if o.direct_parquet {
+                    let (table, scan) = Table::load_parquet_direct(&o.data, q, o.batch_size)?;
+                    (Arc::new(table), scan)
+                } else {
+                    (table.clone(), ParquetScanMetrics::default())
+                };
+                enforce_table_limit(&o, &execution_table)?;
                 let (rows, memory) = with_query_memory(o.query_memory_limit_mb, || {
                     if is_relational(q) {
+                        if o.direct_parquet {
+                            return execute_rel(
+                                q,
+                                &Catalog::load(&o.data, execution_table.clone())?,
+                            );
+                        }
                         if catalog.is_none() {
                             catalog = Some(Arc::new(Catalog::load(&o.data, table.clone())?));
                         }
                         execute_rel(q, catalog.as_ref().expect("catalog loaded"))
                     } else {
-                        execute(q, table.clone(), &pool, o.batch_size)
+                        execute(q, execution_table.clone(), &pool, o.batch_size)
                     }
                 });
                 let ns = now.elapsed().as_nanos();
                 match rows {
                     Ok(rows) => println!(
-                        "RESULT\t{ns}\t{}\t{}\t{}\t{}",
+                        "RESULT\t{ns}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                         rows.len(),
                         if p.get(2) == Some(&"1") {
                             rows_json(&rows)
@@ -469,34 +505,70 @@ pub fn run_bench_server(o: Options) -> Result<(), String> {
                             "[]".into()
                         },
                         memory.limit_bytes(),
-                        memory.accounted_bytes()
+                        memory.accounted_bytes(),
+                        scan.total_rows,
+                        scan.rows_read,
+                        scan.total_row_groups,
+                        scan.row_groups_read,
+                        scan.total_columns,
+                        scan.columns_read,
+                        scan.compressed_bytes_read
                     ),
                     Err(error) => println!("ERROR\t{}", error.replace(['\t', '\n'], " ")),
                 }
             }
             "E2E" => {
                 let now = Instant::now();
-                let q = prepare(
+                let mut q = prepare(
                     Parser::new(p.get(2).ok_or("missing sql")?)?.parse()?,
                     &table,
                 );
                 if q.ctes.is_empty() {
                     bind_query(&q)?;
                 }
+                if o.direct_parquet {
+                    let scan = Table::parquet_scan_plan(&o.data, &q)?;
+                    q.physical.insert(
+                        1,
+                        format!(
+                            "ParquetScanExec(columns={}/{};row_groups={}/{};rows={}/{};compressed_bytes={})",
+                            scan.columns_read,
+                            scan.total_columns,
+                            scan.row_groups_read,
+                            scan.total_row_groups,
+                            scan.rows_read,
+                            scan.total_rows,
+                            scan.compressed_bytes_read
+                        ),
+                    );
+                }
+                let (execution_table, scan) = if o.direct_parquet {
+                    let (table, scan) = Table::load_parquet_direct(&o.data, &q, o.batch_size)?;
+                    (Arc::new(table), scan)
+                } else {
+                    (table.clone(), ParquetScanMetrics::default())
+                };
+                enforce_table_limit(&o, &execution_table)?;
                 let (rows, memory) = with_query_memory(o.query_memory_limit_mb, || {
                     if is_relational(&q) {
+                        if o.direct_parquet {
+                            return execute_rel(
+                                &q,
+                                &Catalog::load(&o.data, execution_table.clone())?,
+                            );
+                        }
                         if catalog.is_none() {
                             catalog = Some(Arc::new(Catalog::load(&o.data, table.clone())?));
                         }
                         execute_rel(&q, catalog.as_ref().expect("catalog loaded"))
                     } else {
-                        execute(&q, table.clone(), &pool, o.batch_size)
+                        execute(&q, execution_table.clone(), &pool, o.batch_size)
                     }
                 });
                 let ns = now.elapsed().as_nanos();
                 match rows {
                     Ok(rows) => println!(
-                        "RESULT\t{ns}\t{}\t{}\t{}\t{}",
+                        "RESULT\t{ns}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                         rows.len(),
                         if p.get(3) == Some(&"1") {
                             rows_json(&rows)
@@ -504,7 +576,14 @@ pub fn run_bench_server(o: Options) -> Result<(), String> {
                             "[]".into()
                         },
                         memory.limit_bytes(),
-                        memory.accounted_bytes()
+                        memory.accounted_bytes(),
+                        scan.total_rows,
+                        scan.rows_read,
+                        scan.total_row_groups,
+                        scan.row_groups_read,
+                        scan.total_columns,
+                        scan.columns_read,
+                        scan.compressed_bytes_read
                     ),
                     Err(error) => println!("ERROR\t{}", error.replace(['\t', '\n'], " ")),
                 }
@@ -523,6 +602,12 @@ pub fn run_bench_server(o: Options) -> Result<(), String> {
             ),
             "SUBMIT" => {
                 let result = (|| -> Result<(), String> {
+                    if o.direct_parquet {
+                        return Err(
+                            "direct Parquet execution is not available for async submissions"
+                                .into(),
+                        );
+                    }
                     let request_id = *p.get(1).ok_or("missing request id")?;
                     let query_id = *p.get(2).ok_or("missing query id")?;
                     let priority = p

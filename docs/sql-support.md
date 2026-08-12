@@ -46,6 +46,22 @@ pushed safely remain as residual filters above joins.
 Set `DREMEL_DISABLE_OPTIMIZER=1` to build a comparable unoptimized plan.
 `EXPLAIN` shows physical operators, estimates, join choices, and applied rules.
 
+## Direct Parquet execution
+
+`--direct-parquet` keeps only Parquet file metadata resident at startup. Each
+query requests its referenced event columns from the official Rust or C++
+Apache Parquet reader and prunes row groups with exact min/max/null statistics
+for supported comparisons, positive `BETWEEN`, positive `IN`, `IS NULL`, and
+boolean conjunctions. Unsupported expressions conservatively retain the row
+group. `EXPLAIN` reports selected columns, row groups, rows, and compressed
+column-chunk bytes. The byte counter is the sum of selected compressed chunks
+from file metadata, not an operating-system I/O counter. Query `--stats`
+reports the same scan counters.
+
+The selected row groups are decoded into the existing in-memory operators.
+Dimension tables used by joins retain the existing load path. Async scheduler
+submissions do not yet use direct Parquet mode.
+
 ## Concurrent execution
 
 The long-lived benchmark server has a bounded admission queue, global and
