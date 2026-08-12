@@ -1142,11 +1142,12 @@ static Rows execute(const Query &q, const std::shared_ptr<Table> &t,
     const auto parts = std::max<std::size_t>(1, threads) * 4;
     std::vector<std::future<GroupTable>> f;
     const auto memory = query_memory;
+    const auto query = std::make_shared<Query>(q);
     for (std::size_t p = 0; p < parts; ++p) {
       auto start = p * t->size() / parts, end = (p + 1) * t->size() / parts;
-      f.push_back(pool.submit([&, start, end, memory] {
+      f.push_back(pool.submit([query, t, start, end, batch, memory] {
         QueryMemoryScope scope(memory);
-        return partition(q, *t, start, end, batch);
+        return partition(*query, *t, start, end, batch);
       }));
     }
     auto init = states(q);
