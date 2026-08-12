@@ -80,12 +80,23 @@ NATIVE=1 \
 ./benchmark.sh
 ```
 
-`EXTENDED`, `SQL_V1`, `OPTIMIZER`, `CONCURRENCY`, `STORAGE`, and
-`PARQUET_DIRECT` default to `1`.
+`EXTENDED`, `SQL_V1`, `OPTIMIZER`, `CONCURRENCY`, `STORAGE`,
+`MEMORY_BOUNDED`, and `PARQUET_DIRECT` default to `1`.
 Set any of them to `0` to skip that suite. The storage suite verifies equal
 typed results and benchmarks full-file load plus in-memory execution for
 DREMCOL1, Arrow IPC, Parquet Snappy, and Parquet Zstd. On Linux,
 `BENCH_CPUSET=0-7` pins both servers through `taskset`.
+
+Every completed benchmark run writes a self-contained interactive report to
+`results/benchmark-report.html`, prints a clickable `file://` URL, and opens it
+in the default browser when the terminal is interactive. Set `REPORT_OPEN=0`
+to prevent automatic opening or `REPORT_OPEN=1` to request it explicitly. The
+report can also be regenerated from existing JSON results without rerunning the
+benchmarks:
+
+```bash
+python3 scripts/generate_benchmark_report.py --results-dir results --open
+```
 
 ## Running an individual query
 

@@ -23,7 +23,13 @@ STORAGE="${STORAGE:-1}"
 MEMORY_BOUNDED="${MEMORY_BOUNDED:-1}"
 PARQUET_DIRECT="${PARQUET_DIRECT:-1}"
 QUERY_MEMORY_LIMIT_MB="${QUERY_MEMORY_LIMIT_MB:-256}"
+REPORT_OPEN="${REPORT_OPEN:-auto}"
 export LTO NATIVE BENCH_CPUSET CPP_STANDARD
+
+if [[ "$REPORT_OPEN" != auto && "$REPORT_OPEN" != 0 && "$REPORT_OPEN" != 1 ]]; then
+  echo "ERROR: REPORT_OPEN must be auto, 0, or 1" >&2
+  exit 1
+fi
 
 if [[ -n "${PYTHON_BIN:-}" ]]; then
   PYTHON="$PYTHON_BIN"
@@ -175,4 +181,25 @@ if [[ "$MEMORY_BOUNDED" == 1 ]]; then
     --query-memory-limit-mb "$QUERY_MEMORY_LIMIT_MB" \
     --manifest benchmark/memory/manifest.json \
     --results-dir results/memory
+fi
+
+REPORT_ARGS=(--results-dir results --include baseline)
+if [[ "$EXTENDED" == 1 ]]; then REPORT_ARGS+=(--include extended); fi
+if [[ "$SQL_V1" == 1 ]]; then REPORT_ARGS+=(--include sql); fi
+if [[ "$OPTIMIZER" == 1 ]]; then REPORT_ARGS+=(--include optimizer); fi
+if [[ "$CONCURRENCY" == 1 ]]; then REPORT_ARGS+=(--include concurrency); fi
+if [[ "$STORAGE" == 1 ]]; then REPORT_ARGS+=(--include storage); fi
+if [[ "$PARQUET_DIRECT" == 1 ]]; then REPORT_ARGS+=(--include parquet); fi
+if [[ "$MEMORY_BOUNDED" == 1 ]]; then REPORT_ARGS+=(--include memory); fi
+
+if [[ "$REPORT_OPEN" == 1 || ( "$REPORT_OPEN" == auto && -t 1 ) ]]; then
+  REPORT_ARGS+=(--open)
+fi
+
+REPORT_URI="$("$PYTHON" scripts/generate_benchmark_report.py "${REPORT_ARGS[@]}")"
+echo
+echo "Interactive benchmark report:"
+echo "$REPORT_URI"
+if [[ -t 1 ]]; then
+  printf '\033]8;;%s\033\\Open interactive benchmark report\033]8;;\033\\\n' "$REPORT_URI"
 fi
