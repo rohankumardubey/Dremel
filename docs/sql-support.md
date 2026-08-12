@@ -36,9 +36,12 @@ type to every expression.
 
 Prepared plans record row estimates, statistics, and applied rules. The shared
 optimizer supports constant folding, three-valued-logic simplification,
-predicate pushdown, projection pruning, filter ordering, Top-K replacement,
-safe inner-join reordering, hash-join selection, build-side selection, and
-hash-probe runtime filters.
+scan-side conjunct pushdown in safe inner/cross-join query blocks, transitive
+predicates across inner equi-joins, integer range contradiction elimination,
+projection pruning, cheap-first short-circuit filter ordering, Top-K
+replacement, selectivity-aware safe inner-join reordering, hash-join selection,
+build-side selection, and hash-probe runtime filters. Predicates that cannot be
+pushed safely remain as residual filters above joins.
 
 Set `DREMEL_DISABLE_OPTIMIZER=1` to build a comparable unoptimized plan.
 `EXPLAIN` shows physical operators, estimates, join choices, and applied rules.

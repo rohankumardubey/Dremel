@@ -1,4 +1,5 @@
 use crate::execution::scalar::{cmp, eval};
+use crate::optimizer::filter_always_false;
 use crate::sql::*;
 use crate::storage::Table;
 use crate::types::*;
@@ -298,6 +299,12 @@ pub(crate) fn partition(
 ) -> Result<GroupTable, String> {
     let template = states(q);
     let mut groups = GroupTable::new()?;
+    if q.group_by.is_empty() {
+        groups.get_or_insert(GroupKey { v: [0; 3], n: 0 }, &template)?;
+    }
+    if filter_always_false(q.filter.as_ref()) {
+        return Ok(groups);
+    }
     account_query_memory(
         batch.max(1).saturating_mul(std::mem::size_of::<usize>()),
         "aggregation selection",

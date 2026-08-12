@@ -51,6 +51,381 @@ static ExprPtr literal_expression(const Scalar &value) {
   expression->text = std::get<std::string>(value);
   return expression;
 }
+
+struct PushedFilter {
+  std::string table;
+  ExprPtr expression;
+  bool derived{};
+};
+
+static void split_conjuncts(const ExprPtr &expression,
+                            std::vector<ExprPtr> &output) {
+  if (expression && expression->kind == ExprKind::binary &&
+      expression->text == "and") {
+    split_conjuncts(expression->left, output);
+    split_conjuncts(expression->right, output);
+  } else if (expression)
+    output.push_back(expression);
+}
+
+static bool expression_relations(const ExprPtr &expression,
+                                 const Bindings &bindings,
+                                 std::set<std::string> &output) {
+  if (!expression)
+    return true;
+  if (expression->kind == ExprKind::column ||
+      expression->kind == ExprKind::dict_eq) {
+    try {
+      output.insert(resolve_column(expression->text, bindings).first);
+      return true;
+    } catch (const std::exception &) {
+      return false;
+    }
+  }
+  if (expression->kind == ExprKind::window || expression->subquery)
+    return false;
+  if (!expression_relations(expression->left, bindings, output) ||
+      !expression_relations(expression->right, bindings, output))
+    return false;
+  for (auto &argument : expression->args)
+    if (!expression_relations(argument, bindings, output))
+      return false;
+  for (auto &[condition, value] : expression->branches)
+    if (!expression_relations(condition, bindings, output) ||
+        !expression_relations(value, bindings, output))
+      return false;
+  return true;
+}
+
+struct ColumnLiteralFilter {
+  std::string column;
+  std::string operation;
+  ExprPtr literal;
+  bool column_on_left{};
+};
+
+static std::optional<ColumnLiteralFilter>
+column_literal_filter(const ExprPtr &expression) {
+  if (!expression || expression->kind != ExprKind::binary)
+    return {};
+  if (expression->left && expression->left->kind == ExprKind::column &&
+      literal_value(expression->right))
+    return ColumnLiteralFilter{expression->left->text, expression->text,
+                               expression->right, true};
+  if (expression->right && expression->right->kind == ExprKind::column &&
+      literal_value(expression->left))
+    return ColumnLiteralFilter{expression->right->text, expression->text,
+                               expression->left, false};
+  return {};
+}
+
+static ExprPtr equivalent_filter(const ExprPtr &expression,
+                                 const std::string &from,
+                                 const std::string &to) {
+  const auto filter = column_literal_filter(expression);
+  if (!filter || filter->column != from)
+    return {};
+  auto replacement = node(ExprKind::binary);
+  replacement->text = filter->operation;
+  auto column = node(ExprKind::column);
+  column->text = to;
+  if (filter->column_on_left) {
+    replacement->left = std::move(column);
+    replacement->right = filter->literal;
+  } else {
+    replacement->left = filter->literal;
+    replacement->right = std::move(column);
+  }
+  return replacement;
+}
+
+static std::string filter_signature(const ExprPtr &expression) {
+  if (!expression)
+    return "null";
+  std::ostringstream output;
+  output << static_cast<int>(expression->kind) << ':' << expression->text
+         << ':' << expression->integer << ':' << std::setprecision(17)
+         << expression->floating << ':' << expression->boolean << '('
+         << filter_signature(expression->left) << ','
+         << filter_signature(expression->right);
+  for (auto &argument : expression->args)
+    output << ',' << filter_signature(argument);
+  return output.str() + ')';
+}
+
+static std::vector<PushedFilter> pushed_filters(const Query &query) {
+  if (!query.optimizer_enabled)
+    return {};
+  if (std::any_of(query.joins.begin(), query.joins.end(), [](const auto &join) {
+        return join.kind != JoinKind::inner && join.kind != JoinKind::cross;
+      }))
+    return {};
+  Bindings bindings;
+  try {
+    bindings = query_bindings(query);
+  } catch (const std::exception &) {
+    return {};
+  }
+  std::vector<PushedFilter> output;
+  std::vector<ExprPtr> conjuncts;
+  split_conjuncts(query.filter, conjuncts);
+  for (auto &expression : conjuncts) {
+    std::set<std::string> relations;
+    if (expression_relations(expression, bindings, relations) &&
+        relations.size() == 1)
+      output.push_back({*relations.begin(), expression, false});
+  }
+  const auto seeds = output;
+  for (auto &join : query.joins) {
+    if (join.kind != JoinKind::inner || !join.on ||
+        join.on->kind != ExprKind::binary || join.on->text != "=" ||
+        !join.on->left || !join.on->right ||
+        join.on->left->kind != ExprKind::column ||
+        join.on->right->kind != ExprKind::column)
+      continue;
+    for (auto &seed : seeds)
+      for (const auto &[from, to] :
+           std::array<std::pair<std::string, std::string>, 2>{
+               std::pair{join.on->left->text, join.on->right->text},
+               std::pair{join.on->right->text, join.on->left->text}}) {
+        auto expression = equivalent_filter(seed.expression, from, to);
+        if (!expression)
+          continue;
+        std::string table;
+        try {
+          table = resolve_column(to, bindings).first;
+        } catch (const std::exception &) {
+          continue;
+        }
+        const auto signature = table + ':' + filter_signature(expression);
+        if (std::any_of(output.begin(), output.end(), [&](const auto &filter) {
+              return filter.table + ':' + filter_signature(filter.expression) ==
+                     signature;
+            }))
+          continue;
+        output.push_back({std::move(table), std::move(expression), true});
+      }
+  }
+  return output;
+}
+
+static ExprPtr residual_filter(const Query &query) {
+  std::set<std::string> pushed;
+  for (auto &filter : pushed_filters(query))
+    if (!filter.derived)
+      pushed.insert(filter_signature(filter.expression));
+  if (pushed.empty())
+    return query.filter;
+  std::vector<ExprPtr> conjuncts;
+  split_conjuncts(query.filter, conjuncts);
+  std::erase_if(conjuncts, [&](const auto &expression) {
+    return pushed.contains(filter_signature(expression));
+  });
+  if (conjuncts.empty())
+    return {};
+  auto residual = conjuncts.front();
+  for (std::size_t index = 1; index < conjuncts.size(); ++index) {
+    auto conjunction = node(ExprKind::binary);
+    conjunction->text = "and";
+    conjunction->left = std::move(residual);
+    conjunction->right = conjuncts[index];
+    residual = std::move(conjunction);
+  }
+  return residual;
+}
+
+static bool filter_always_false(const ExprPtr &filter) {
+  return filter &&
+         (filter->kind == ExprKind::null ||
+          (filter->kind == ExprKind::boolean && !filter->boolean));
+}
+
+struct ComparisonConstraint {
+  std::string column;
+  std::string operation;
+  std::int64_t value{};
+};
+
+static std::optional<ComparisonConstraint>
+comparison_constraint(const ExprPtr &expression) {
+  if (!expression || expression->kind != ExprKind::binary)
+    return {};
+  if (expression->left && expression->right &&
+      expression->left->kind == ExprKind::column &&
+      expression->right->kind == ExprKind::integer)
+    return ComparisonConstraint{expression->left->text, expression->text,
+                                expression->right->integer};
+  if (expression->left && expression->right &&
+      expression->left->kind == ExprKind::integer &&
+      expression->right->kind == ExprKind::column) {
+    auto operation = expression->text;
+    if (operation == "<")
+      operation = ">";
+    else if (operation == "<=")
+      operation = ">=";
+    else if (operation == ">")
+      operation = "<";
+    else if (operation == ">=")
+      operation = "<=";
+    return ComparisonConstraint{expression->right->text, operation,
+                                expression->left->integer};
+  }
+  return {};
+}
+
+static bool contradictory_filter(const ExprPtr &expression) {
+  struct Bounds {
+    std::optional<std::int64_t> equal;
+    std::optional<std::pair<std::int64_t, bool>> lower, upper;
+  };
+  std::vector<ExprPtr> conjuncts;
+  split_conjuncts(expression, conjuncts);
+  if (std::any_of(conjuncts.begin(), conjuncts.end(),
+                  [](const auto &value) { return filter_always_false(value); }))
+    return true;
+  std::unordered_map<std::string, Bounds> columns;
+  for (auto &conjunct : conjuncts) {
+    const auto constraint = comparison_constraint(conjunct);
+    if (!constraint)
+      continue;
+    auto &bounds = columns[constraint->column];
+    if (constraint->operation == "=") {
+      if (bounds.equal && *bounds.equal != constraint->value)
+        return true;
+      bounds.equal = constraint->value;
+    } else if (constraint->operation == ">" ||
+               constraint->operation == ">=") {
+      const auto candidate =
+          std::pair{constraint->value, constraint->operation == ">="};
+      if (!bounds.lower || candidate.first > bounds.lower->first ||
+          (candidate.first == bounds.lower->first && !candidate.second &&
+           bounds.lower->second))
+        bounds.lower = candidate;
+    } else if (constraint->operation == "<" ||
+               constraint->operation == "<=") {
+      const auto candidate =
+          std::pair{constraint->value, constraint->operation == "<="};
+      if (!bounds.upper || candidate.first < bounds.upper->first ||
+          (candidate.first == bounds.upper->first && !candidate.second &&
+           bounds.upper->second))
+        bounds.upper = candidate;
+    }
+  }
+  for (auto &[_, bounds] : columns) {
+    if (bounds.equal &&
+        ((bounds.lower &&
+          (*bounds.equal < bounds.lower->first ||
+           (*bounds.equal == bounds.lower->first && !bounds.lower->second))) ||
+         (bounds.upper &&
+          (*bounds.equal > bounds.upper->first ||
+           (*bounds.equal == bounds.upper->first && !bounds.upper->second)))))
+      return true;
+    if (bounds.lower && bounds.upper &&
+        (bounds.lower->first > bounds.upper->first ||
+         (bounds.lower->first == bounds.upper->first &&
+          !(bounds.lower->second && bounds.upper->second))))
+      return true;
+  }
+  return false;
+}
+
+static std::size_t predicate_rank(const ExprPtr &expression) {
+  if (!expression)
+    return 3;
+  if (expression->kind == ExprKind::dict_eq)
+    return 0;
+  if (expression->kind == ExprKind::binary &&
+      (literal_value(expression->left) || literal_value(expression->right)) &&
+      (expression->text == "=" || expression->text == "!=" ||
+       expression->text == "<" || expression->text == "<=" ||
+       expression->text == ">" || expression->text == ">=")) {
+    const auto non_literal = literal_value(expression->left)
+                                 ? expression->right
+                                 : expression->left;
+    return non_literal && non_literal->kind == ExprKind::column ? 1 : 4;
+  }
+  if (expression->kind == ExprKind::is_null ||
+      expression->kind == ExprKind::between ||
+      expression->kind == ExprKind::in_list)
+    return 2;
+  if (expression->kind == ExprKind::like ||
+      expression->kind == ExprKind::function ||
+      expression->kind == ExprKind::call)
+    return 4;
+  return 3;
+}
+
+static bool reorder_conjuncts(ExprPtr &filter) {
+  std::vector<ExprPtr> conjuncts;
+  split_conjuncts(filter, conjuncts);
+  if (conjuncts.size() < 2)
+    return false;
+  const auto original = filter_signature(filter);
+  std::stable_sort(conjuncts.begin(), conjuncts.end(), [](const auto &left,
+                                                          const auto &right) {
+    return predicate_rank(left) < predicate_rank(right);
+  });
+  auto rebuilt = conjuncts.front();
+  for (std::size_t index = 1; index < conjuncts.size(); ++index) {
+    auto conjunction = node(ExprKind::binary);
+    conjunction->text = "and";
+    conjunction->left = std::move(rebuilt);
+    conjunction->right = conjuncts[index];
+    rebuilt = std::move(conjunction);
+  }
+  const bool changed = original != filter_signature(rebuilt);
+  filter = std::move(rebuilt);
+  return changed;
+}
+
+static std::size_t estimated_filtered_rows(
+    const std::string &table, const std::vector<PushedFilter> &filters,
+    std::size_t event_rows) {
+  std::size_t estimate = table == "events"      ? event_rows
+                         : table == "users"     ? 250'000
+                         : table == "campaigns" ? 5'000
+                                                : 1'000;
+  for (auto &pushed : filters) {
+    if (pushed.table != table)
+      continue;
+    const auto filter = column_literal_filter(pushed.expression);
+    if (filter && filter->literal->kind == ExprKind::integer &&
+        base_name(filter->column).ends_with("_id")) {
+      auto operation = filter->operation;
+      if (!filter->column_on_left) {
+        if (operation == "<")
+          operation = ">";
+        else if (operation == "<=")
+          operation = ">=";
+        else if (operation == ">")
+          operation = "<";
+        else if (operation == ">=")
+          operation = "<=";
+      }
+      const auto value = filter->literal->integer;
+      if (operation == "=")
+        estimate = 1;
+      else if (operation == "<")
+        estimate = std::min(
+            estimate,
+            static_cast<std::size_t>(std::max<std::int64_t>(0, value)));
+      else if (operation == "<=") {
+        const auto inclusive =
+            value == std::numeric_limits<std::int64_t>::max() ? value
+                                                               : value + 1;
+        estimate = std::min(
+            estimate,
+            static_cast<std::size_t>(std::max<std::int64_t>(0, inclusive)));
+      } else if (operation == ">" || operation == ">=")
+        estimate = (estimate + 1) / 2;
+      else
+        estimate = (estimate + 9) / 10;
+      continue;
+    }
+    estimate = (estimate + 9) / 10;
+  }
+  return std::max<std::size_t>(1, estimate);
+}
 static std::size_t optimize_expression(ExprPtr &expression) {
   if (!expression)
     return 0;
@@ -164,11 +539,16 @@ static std::size_t optimize_expression(ExprPtr &expression) {
   }
   return rewrites;
 }
-static std::size_t optimize_query(Query &query) {
+static std::size_t optimize_query(Query &query, std::size_t event_rows) {
   std::size_t rewrites{};
   for (auto &item : query.select)
     rewrites += optimize_expression(item.expr);
   rewrites += optimize_expression(query.filter);
+  if (query.filter && contradictory_filter(query.filter)) {
+    query.filter = literal_expression(Scalar{false});
+    ++rewrites;
+  } else if (query.filter && reorder_conjuncts(query.filter))
+    ++rewrites;
   for (auto &join : query.joins)
     rewrites += optimize_expression(join.on);
   rewrites += optimize_expression(query.having);
@@ -193,19 +573,16 @@ static std::size_t optimize_query(Query &query) {
     safe_star_reorder = false;
   }
   if (query.optimizer_enabled && query.joins.size() > 1 && safe_star_reorder) {
+    const auto filters = pushed_filters(query);
     std::vector<std::string> original;
     for (auto &join : query.joins)
       original.push_back(join.table.name);
-    const auto cardinality = [](const JoinSpec &join) {
-      return join.table.name == "campaigns" ? std::size_t{5'000}
-             : join.table.name == "users"   ? std::size_t{250'000}
-             : join.table.name == "events"
-                 ? std::size_t{1'000'000}
-                 : std::numeric_limits<std::size_t>::max();
-    };
     std::stable_sort(query.joins.begin(), query.joins.end(),
                      [&](const auto &left, const auto &right) {
-                       return cardinality(left) < cardinality(right);
+                       return estimated_filtered_rows(left.table.name, filters,
+                                                      event_rows) <
+                              estimated_filtered_rows(right.table.name, filters,
+                                                      event_rows);
                      });
     std::vector<std::string> optimized;
     for (auto &join : query.joins)
@@ -217,16 +594,41 @@ static std::size_t optimize_query(Query &query) {
 }
 static Query prepare(Query q, const Table &t) {
   q.optimizer_enabled = std::getenv("DREMEL_DISABLE_OPTIMIZER") == nullptr;
-  const auto rewrites = q.optimizer_enabled ? optimize_query(q) : 0;
+  auto rewrites = q.optimizer_enabled ? optimize_query(q, t.size()) : 0;
   plan(q);
   prepare_expr(q.filter, t);
   for (auto &join : q.joins)
     prepare_expr(join.on, t);
   prepare_expr(q.having, t);
+  std::vector<PushedFilter> scan_filters;
+  if (q.optimizer_enabled) {
+    std::vector<std::string> scan_operators;
+    if (filter_always_false(q.filter))
+      scan_operators.push_back("EmptyScanExec(reason=contradiction)");
+    std::map<std::string, std::pair<std::size_t, std::size_t>> by_table;
+    scan_filters = pushed_filters(q);
+    rewrites += scan_filters.size();
+    for (auto &filter : scan_filters) {
+      auto &counts = by_table[filter.table];
+      ++counts.first;
+      counts.second += filter.derived ? 1 : 0;
+    }
+    for (auto &[table, counts] : by_table)
+      scan_operators.push_back(
+          "ScanFilterExec(table=" + table +
+          ";predicates=" + std::to_string(counts.first) +
+          ";derived=" + std::to_string(counts.second) + ")");
+    q.physical.insert(q.physical.begin() + 1, scan_operators.begin(),
+                      scan_operators.end());
+  }
   auto estimate = q.from.name == "users"       ? std::size_t{250'000}
                   : q.from.name == "campaigns" ? std::size_t{5'000}
                                                : t.size();
-  if (q.filter)
+  if (filter_always_false(q.filter))
+    estimate = 0;
+  else if (q.optimizer_enabled && !scan_filters.empty())
+    estimate = estimated_filtered_rows(q.from.name, scan_filters, t.size());
+  else if (q.filter)
     estimate = (estimate + 9) / 10;
   if (q.limit)
     estimate = std::min(estimate, *q.limit);
@@ -258,8 +660,9 @@ static Query prepare(Query q, const Table &t) {
       q.optimizer_enabled
           ? "OptimizerExec(rewrites=" + std::to_string(rewrites) +
                 ";rules=constant_folding+3vl+projection_pruning+predicate_"
-                "pushdown+aggregate_filter_ordering+join_ordering+join_"
-                "selection+runtime_filter+topk)"
+                "pushdown+transitive_predicates+range_contradiction+filter_"
+                "ordering+selectivity_join_order+join_selection+runtime_"
+                "filter+topk)"
           : "OptimizerExec(disabled=true)");
   return q;
 }

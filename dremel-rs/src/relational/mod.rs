@@ -1,24 +1,44 @@
 use crate::execution::aggregate::*;
 use crate::execution::scalar::*;
+use crate::optimizer::{PushedFilter, filter_always_false, pushed_filters, residual_filter};
 use crate::sql::*;
 use crate::storage::*;
 use crate::types::*;
 use std::cmp::Ordering;
 
 pub(crate) fn base_relation_rows(table: &str, catalog: &Catalog) -> Vec<RelRow> {
+    base_relation_rows_filtered(table, catalog, &std::collections::HashMap::new(), &[])
+}
+
+pub(crate) fn base_relation_rows_filtered(
+    table: &str,
+    catalog: &Catalog,
+    bindings: &std::collections::HashMap<String, String>,
+    filters: &[PushedFilter],
+) -> Vec<RelRow> {
     let (rows, relation) = match table {
         "events" => (catalog.events.len(), 0),
         "users" => (catalog.users.user_id.len(), 1),
         "campaigns" => (catalog.campaigns.campaign_id.len(), 2),
         _ => return Vec::new(),
     };
-    if !account_query_memory_or_stop(
-        rows.saturating_mul(std::mem::size_of::<RelRow>()),
-        "relation materialization",
-    ) {
+    let table_filters: Vec<_> = filters
+        .iter()
+        .filter(|filter| filter.table == table)
+        .collect();
+    if table_filters.is_empty()
+        && !account_query_memory_or_stop(
+            rows.saturating_mul(std::mem::size_of::<RelRow>()),
+            "relation materialization",
+        )
+    {
         return Vec::new();
     }
-    let mut output = Vec::with_capacity(rows);
+    let mut output = if table_filters.is_empty() {
+        Vec::with_capacity(rows)
+    } else {
+        Vec::new()
+    };
     for index in 0..rows {
         if index % 4096 == 0 && execution_cancelled() {
             break;
@@ -28,6 +48,22 @@ pub(crate) fn base_relation_rows(table: &str, catalog: &Catalog) -> Vec<RelRow> 
             0 => row.event = Some(index),
             1 => row.user = Some(index),
             _ => row.campaign = Some(index),
+        }
+        if !table_filters
+            .iter()
+            .all(|filter| eval_rel(&filter.expression, catalog, row, bindings).truthy())
+        {
+            continue;
+        }
+        if !table_filters.is_empty() && output.len() == output.capacity() {
+            let additional = 4096.min(rows.saturating_sub(index));
+            if !account_query_memory_or_stop(
+                additional.saturating_mul(std::mem::size_of::<RelRow>()),
+                "pushed scan output",
+            ) {
+                return Vec::new();
+            }
+            output.reserve_exact(additional);
         }
         output.push(row);
     }
@@ -123,8 +159,9 @@ pub(crate) fn apply_join(
     catalog: &Catalog,
     bindings: &std::collections::HashMap<String, String>,
     optimizer_enabled: bool,
+    filters: &[PushedFilter],
 ) -> Vec<RelRow> {
-    let right_rows = base_relation_rows(&join.table.name, catalog);
+    let right_rows = base_relation_rows_filtered(&join.table.name, catalog, bindings, filters);
     if join.kind == JoinKind::Cross {
         let count = left_rows.len().saturating_mul(right_rows.len());
         if !account_query_memory_or_stop(
@@ -1363,17 +1400,34 @@ pub(crate) fn execute_rel_inner(
         return Ok(rows);
     }
     let bindings = bind_query(query)?;
-    let mut relation = base_relation_rows(&query.from.name, catalog);
+    let scan_filters = pushed_filters(query);
+    let residual_filter = residual_filter(query);
+    let impossible = filter_always_false(query.filter.as_ref());
+    let mut relation = if impossible {
+        Vec::new()
+    } else {
+        base_relation_rows_filtered(&query.from.name, catalog, &bindings, &scan_filters)
+    };
     if execution_cancelled() {
         return Ok(Vec::new());
     }
     for join in &query.joins {
-        relation = apply_join(relation, join, catalog, &bindings, query.optimizer_enabled);
+        if impossible {
+            break;
+        }
+        relation = apply_join(
+            relation,
+            join,
+            catalog,
+            &bindings,
+            query.optimizer_enabled,
+            &scan_filters,
+        );
         if execution_cancelled() {
             return Ok(Vec::new());
         }
     }
-    if let Some(filter) = &query.filter {
+    if !impossible && let Some(filter) = &residual_filter {
         relation.retain(|row| {
             !execution_cancelled() && eval_rel(filter, catalog, *row, &bindings).truthy()
         });

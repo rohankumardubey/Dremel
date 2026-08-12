@@ -113,5 +113,74 @@
       "FilterExec",
       "PartialAggregateExec"
     ]
+  },
+  {
+    "query_id": "O009",
+    "category": "window_scan_pushdown",
+    "file": "queries/O009.sql",
+    "description": "SELECT event_id, ROW_NUMBER() OVER (PARTITION BY country ORDER BY score DESC, event_id ASC) AS rn FROM events WHERE event_id <= 100000 ORDER BY event_id ASC LIMIT 1000",
+    "expected_optimized_operators": [
+      "WindowExec",
+      "ScanFilterExec"
+    ],
+    "expected_disabled_operator": null,
+    "execute_disabled": true,
+    "required_plan_fragments": [
+      "ScanFilterExec(table=events;predicates=1;derived=0)"
+    ]
+  },
+  {
+    "query_id": "O010",
+    "category": "range_contradiction",
+    "file": "queries/O010.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE event_id > 900000 AND event_id < 1000",
+    "expected_optimized_operators": [
+      "EmptyScanExec",
+      "OptimizerExec"
+    ],
+    "expected_disabled_operator": null,
+    "execute_disabled": true,
+    "minimum_rewrites": 1,
+    "required_plan_fragments": [
+      "EmptyScanExec(reason=contradiction)"
+    ]
+  },
+  {
+    "query_id": "O011",
+    "category": "filter_ordering",
+    "file": "queries/O011.sql",
+    "description": "SELECT COUNT(*) FROM events WHERE LOWER(country) = 'in' AND event_id <= 100",
+    "expected_optimized_operators": [
+      "ScanFilterExec",
+      "OptimizerExec"
+    ],
+    "expected_disabled_operator": null,
+    "execute_disabled": true,
+    "minimum_rewrites": 1,
+    "required_plan_fragments": [
+      "ScanFilterExec(table=events;predicates=2;derived=0)"
+    ]
+  },
+  {
+    "query_id": "O012",
+    "category": "transitive_predicate_join_order",
+    "file": "queries/O012.sql",
+    "description": "SELECT COUNT(*) FROM events e JOIN campaigns c ON e.campaign_id = c.campaign_id JOIN users u ON e.user_id = u.user_id WHERE u.user_id <= 100",
+    "expected_optimized_operators": [
+      "HashJoinExec",
+      "ScanFilterExec",
+      "OptimizerExec"
+    ],
+    "expected_disabled_operator": "NestedLoopJoinExec",
+    "execute_disabled": false,
+    "minimum_rewrites": 1,
+    "ordered_plan_fragments": [
+      "table=users",
+      "table=campaigns"
+    ],
+    "required_plan_fragments": [
+      "ScanFilterExec(table=events;predicates=1;derived=1)",
+      "ScanFilterExec(table=users;predicates=1;derived=0)"
+    ]
   }
 ]

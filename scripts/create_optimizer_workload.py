@@ -64,6 +64,34 @@ QUERIES = [
         ["FilterExec", "PartialAggregateExec"],
         True,
     ),
+    (
+        "O009",
+        "window_scan_pushdown",
+        "SELECT event_id, ROW_NUMBER() OVER (PARTITION BY country ORDER BY score DESC, event_id ASC) AS rn FROM events WHERE event_id <= 100000 ORDER BY event_id ASC LIMIT 1000",
+        ["WindowExec", "ScanFilterExec"],
+        True,
+    ),
+    (
+        "O010",
+        "range_contradiction",
+        "SELECT COUNT(*) FROM events WHERE event_id > 900000 AND event_id < 1000",
+        ["EmptyScanExec", "OptimizerExec"],
+        True,
+    ),
+    (
+        "O011",
+        "filter_ordering",
+        "SELECT COUNT(*) FROM events WHERE LOWER(country) = 'in' AND event_id <= 100",
+        ["ScanFilterExec", "OptimizerExec"],
+        True,
+    ),
+    (
+        "O012",
+        "transitive_predicate_join_order",
+        "SELECT COUNT(*) FROM events e JOIN campaigns c ON e.campaign_id = c.campaign_id JOIN users u ON e.user_id = u.user_id WHERE u.user_id <= 100",
+        ["HashJoinExec", "ScanFilterExec", "OptimizerExec"],
+        False,
+    ),
 ]
 
 ASSERTIONS = {
@@ -85,6 +113,30 @@ ASSERTIONS = {
     },
     "aggregate_filter_pushdown": {
         "ordered_operators": ["FilterExec", "PartialAggregateExec"]
+    },
+    "window_scan_pushdown": {
+        "required_plan_fragments": [
+            "ScanFilterExec(table=events;predicates=1;derived=0)"
+        ]
+    },
+    "range_contradiction": {
+        "minimum_rewrites": 1,
+        "required_plan_fragments": ["EmptyScanExec(reason=contradiction)"],
+    },
+    "filter_ordering": {
+        "minimum_rewrites": 1,
+        "required_plan_fragments": [
+            "ScanFilterExec(table=events;predicates=2;derived=0)"
+        ],
+    },
+    "transitive_predicate_join_order": {
+        "minimum_rewrites": 1,
+        "ordered_plan_fragments": ["table=users", "table=campaigns"],
+        "required_plan_fragments": [
+            "ScanFilterExec(table=events;predicates=1;derived=1)",
+            "ScanFilterExec(table=users;predicates=1;derived=0)",
+        ],
+        "expected_disabled_operator": "NestedLoopJoinExec",
     },
 }
 

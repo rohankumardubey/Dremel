@@ -16,8 +16,8 @@ It is an independent implementation and is not Google Dremel or BigQuery.
 | Engines | Rust 1.97.1 (Rust 2024) and LLVM Clang 22.1.8 (C++26) |
 | Storage | DREMCOL1, Apache Arrow IPC, and Apache Parquet with Snappy or Zstd |
 | Execution | Batched scans, selection vectors, partitioned aggregation, joins and windows |
-| Optimizer | Pushdown, pruning, constant folding, join selection/reordering, runtime filters and Top-K |
-| Workloads | 64 baseline, 16 hardening, 68 SQL, 8 optimizer and 5 concurrency cases |
+| Optimizer | Scan filters, transitive predicates, pruning, contradiction elimination, selectivity-aware join ordering and Top-K |
+| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer and 5 concurrency cases |
 | Validation | Cross-engine typed results, SQLite differential tests and plan assertions |
 
 The toolchains are pinned so a later compiler update does not silently change
@@ -164,9 +164,10 @@ provides a Linux correctness environment; do not mix Docker measurements with
 native host measurements.
 
 The current Arrow and Parquet path decodes the full file into the engine's
-in-memory columns. Row-group pruning and direct predicate pushdown are future
-work. Distributed exchange, durable spill/recovery, transactions, and database
-wire protocols are also outside the current scope.
+in-memory columns. Scan-side predicates reduce execution intermediates after
+load; Parquet row-group pruning remains future work. Distributed exchange,
+durable spill/recovery, transactions, and database wire protocols are also
+outside the current scope.
 
 The main benchmark also runs `benchmark/memory/manifest.json` with a 256 MiB
 query workspace cap. Set `MEMORY_BOUNDED=0` to skip that suite or change the

@@ -553,7 +553,16 @@ pub(crate) fn eval(e: &Expr, t: &Table, i: usize) -> Scalar {
         },
         Expr::Window { .. } => Scalar::Null,
         Expr::ScalarSubquery(_) | Expr::Exists(_) | Expr::InSubquery(_, _, _) => Scalar::Null,
-        Expr::Binary(op, a, b) => apply_binary(op, eval(a, t, i), eval(b, t, i)),
+        Expr::Binary(op, a, b) => {
+            let left = eval(a, t, i);
+            if (op == "and" && left.sql_bool() == Some(false))
+                || (op == "or" && left.sql_bool() == Some(true))
+            {
+                left
+            } else {
+                apply_binary(op, left, eval(b, t, i))
+            }
+        }
     }
 }
 

@@ -131,15 +131,25 @@ def main() -> int:
                         f"{qid}: expected at least {minimum_rewrites} rewrite(s)"
                     )
             _, rust_rows = rust_on.execute(qid, True)
+            rust_optimized_memory = dict(rust_on.last_query_memory)
             _, cpp_rows = cpp_on.execute(qid, True)
+            cpp_optimized_memory = dict(cpp_on.last_query_memory)
             ordered = "ORDER BY" in sql.upper()
             correct, detail = compare_rows(rust_rows, cpp_rows, ordered)
             if not correct:
                 raise RuntimeError(f"{qid}: cross-engine result mismatch: {detail}")
             disabled_verified = bool(item["execute_disabled"])
+            memory_accounting = {
+                "rust_optimized": rust_optimized_memory,
+                "cpp_optimized": cpp_optimized_memory,
+            }
             if disabled_verified:
                 _, rust_disabled_rows = rust_off.execute(qid, True)
+                memory_accounting["rust_disabled"] = dict(
+                    rust_off.last_query_memory
+                )
                 _, cpp_disabled_rows = cpp_off.execute(qid, True)
+                memory_accounting["cpp_disabled"] = dict(cpp_off.last_query_memory)
                 for name, rows in (
                     ("Rust disabled", rust_disabled_rows),
                     ("C++ disabled", cpp_disabled_rows),
@@ -155,6 +165,7 @@ def main() -> int:
                 "result_hash": result_hash(rust_rows, ordered),
                 "row_count": len(rust_rows),
                 "plans": plans,
+                "memory_accounting": memory_accounting,
             }
             if not args.validate_only:
                 timing = {}
@@ -209,6 +220,38 @@ def main() -> int:
                     / 1e6,
                     "rust_speedup": row.get("rust_speedup", "plan-only"),
                     "cpp_speedup": row.get("cpp_speedup", "plan-only"),
+                    "rust_optimized_accounted_bytes": row["memory_accounting"][
+                        "rust_optimized"
+                    ]["accounted_bytes"],
+                    "cpp_optimized_accounted_bytes": row["memory_accounting"][
+                        "cpp_optimized"
+                    ]["accounted_bytes"],
+                    "rust_memory_reduction": (
+                        row["memory_accounting"]["rust_disabled"][
+                            "accounted_bytes"
+                        ]
+                        / max(
+                            1,
+                            row["memory_accounting"]["rust_optimized"][
+                                "accounted_bytes"
+                            ],
+                        )
+                        if row["disabled_execution_verified"]
+                        else "plan-only"
+                    ),
+                    "cpp_memory_reduction": (
+                        row["memory_accounting"]["cpp_disabled"][
+                            "accounted_bytes"
+                        ]
+                        / max(
+                            1,
+                            row["memory_accounting"]["cpp_optimized"][
+                                "accounted_bytes"
+                            ],
+                        )
+                        if row["disabled_execution_verified"]
+                        else "plan-only"
+                    ),
                 }
             )
         with (out / "optimizer.csv").open("w", newline="") as handle:
@@ -231,9 +274,20 @@ def main() -> int:
                 if isinstance(row["cpp_speedup"], (int, float))
                 else row["cpp_speedup"]
             )
+            rust_memory = (
+                f"{row['rust_memory_reduction']:.3f}x"
+                if isinstance(row["rust_memory_reduction"], (int, float))
+                else row["rust_memory_reduction"]
+            )
+            cpp_memory = (
+                f"{row['cpp_memory_reduction']:.3f}x"
+                if isinstance(row["cpp_memory_reduction"], (int, float))
+                else row["cpp_memory_reduction"]
+            )
             report.append(
                 f"{row['query_id']} {row['category']}: "
-                f"Rust {rust_speedup}; C++ {cpp_speedup}"
+                f"Rust {rust_speedup}, memory {rust_memory}; "
+                f"C++ {cpp_speedup}, memory {cpp_memory}"
             )
         (out / "report.txt").write_text("\n".join(report) + "\n")
         print(

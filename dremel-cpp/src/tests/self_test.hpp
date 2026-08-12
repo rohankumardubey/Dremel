@@ -34,7 +34,7 @@ static int self_test(const std::string &dir) {
              "u.user_id JOIN campaigns c ON e.campaign_id = c.campaign_id")
           .parse();
   star_join.optimizer_enabled = true;
-  assert(optimize_query(star_join) == 1);
+  assert(optimize_query(star_join, 1'000'000) == 1);
   assert(star_join.joins[0].table.name == "campaigns" &&
          star_join.joins[1].table.name == "users");
   auto dependent_join =
@@ -42,7 +42,7 @@ static int self_test(const std::string &dir) {
              "u.user_id JOIN campaigns c ON c.campaign_id = u.user_id")
           .parse();
   dependent_join.optimizer_enabled = true;
-  assert(optimize_query(dependent_join) == 0);
+  assert(optimize_query(dependent_join, 1'000'000) == 0);
   assert(dependent_join.joins[0].table.name == "users" &&
          dependent_join.joins[1].table.name == "campaigns");
   GroupTable g;

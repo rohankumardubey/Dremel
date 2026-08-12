@@ -39,6 +39,8 @@ QUERIES = {
     "D021": "SELECT COUNT(*) FROM (SELECT campaign_id FROM campaigns WHERE campaign_id <= 5) c, (SELECT user_id FROM users WHERE user_id <= 10) u;",
     "D022": "SELECT campaign_id, budget + 1, budget + 0.5 FROM campaigns WHERE campaign_id <= 100 ORDER BY campaign_id;",
     "D023": "SELECT event_id, MIN(score) OVER (PARTITION BY country), MAX(score) OVER (PARTITION BY country) FROM events WHERE event_id <= 500 ORDER BY event_id;",
+    "D024": "SELECT COUNT(*) FROM events WHERE event_id > 900000 AND event_id < 1000;",
+    "D025": "SELECT COUNT(*) FROM campaigns c LEFT JOIN events e ON c.campaign_id = e.campaign_id WHERE e.event_id IS NULL;",
 }
 
 

@@ -145,16 +145,32 @@ static Scalar finish(const Agg &a) {
   return a.has ? a.extreme : Scalar{std::monostate{}};
 }
 
+static std::vector<RelRow>
+base_relation_rows_filtered(const std::string &table, const Catalog &catalog,
+                            const Bindings &bindings,
+                            const std::vector<PushedFilter> &filters);
 static std::vector<RelRow> base_relation_rows(const std::string &table,
                                               const Catalog &catalog) {
+  return base_relation_rows_filtered(table, catalog, Bindings{}, {});
+}
+static std::vector<RelRow>
+base_relation_rows_filtered(const std::string &table, const Catalog &catalog,
+                            const Bindings &bindings,
+                            const std::vector<PushedFilter> &filters) {
   std::vector<RelRow> rows;
   const auto size = table == "events"  ? catalog.events->size()
                     : table == "users" ? catalog.users.user_id.size()
                     : table == "campaigns"
                         ? catalog.campaigns.campaign_id.size()
                         : 0;
-  account_query_memory(size * sizeof(RelRow), "relation materialization");
-  rows.reserve(size);
+  std::vector<const PushedFilter *> table_filters;
+  for (auto &filter : filters)
+    if (filter.table == table)
+      table_filters.push_back(&filter);
+  if (table_filters.empty()) {
+    account_query_memory(size * sizeof(RelRow), "relation materialization");
+    rows.reserve(size);
+  }
   for (std::size_t index = 0; index < size; ++index) {
     if (index % 4096 == 0 && execution_cancelled())
       break;
@@ -165,6 +181,17 @@ static std::vector<RelRow> base_relation_rows(const std::string &table,
       row.user = index;
     else if (table == "campaigns")
       row.campaign = index;
+    if (!std::all_of(table_filters.begin(), table_filters.end(),
+                     [&](const auto *filter) {
+                       return truthy(eval_rel(filter->expression, catalog, row,
+                                              bindings));
+                     }))
+      continue;
+    if (!table_filters.empty() && rows.size() == rows.capacity()) {
+      const auto additional = std::min<std::size_t>(4096, size - index);
+      account_query_memory(additional * sizeof(RelRow), "pushed scan output");
+      rows.reserve(rows.capacity() + additional);
+    }
     rows.push_back(row);
   }
   return rows;
@@ -214,8 +241,10 @@ static std::vector<RelRow> apply_join(std::vector<RelRow> left_rows,
                                       const JoinSpec &join,
                                       const Catalog &catalog,
                                       const Bindings &bindings,
-                                      bool optimizer_enabled) {
-  auto right_rows = base_relation_rows(join.table.name, catalog);
+                                      bool optimizer_enabled,
+                                      const std::vector<PushedFilter> &filters) {
+  auto right_rows = base_relation_rows_filtered(join.table.name, catalog,
+                                                 bindings, filters);
   std::vector<RelRow> output;
   if (join.kind == JoinKind::cross) {
     if (right_rows.size() &&
@@ -382,6 +411,10 @@ static GroupTable partition(const Query &q, const Table &t, std::size_t start,
                             std::size_t end, std::size_t batch) {
   auto init = states(q);
   GroupTable groups;
+  if (q.group_by.empty())
+    (void)groups.get(Key{}, init);
+  if (filter_always_false(q.filter))
+    return groups;
   std::vector<std::size_t> selection;
   account_query_memory(std::max<std::size_t>(1, batch) * sizeof(std::size_t),
                        "aggregation selection");

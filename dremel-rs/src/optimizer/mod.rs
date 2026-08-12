@@ -2,6 +2,389 @@ use crate::execution::scalar::{apply_binary, cast_value, decimal_text, eval_valu
 use crate::sql::*;
 use crate::storage::{Table, query_bindings, resolve_column};
 use crate::types::Scalar;
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+#[derive(Clone)]
+pub(crate) struct PushedFilter {
+    pub(crate) table: String,
+    pub(crate) expression: Expr,
+    pub(crate) derived: bool,
+}
+
+pub(crate) fn split_conjuncts<'a>(expression: &'a Expr, output: &mut Vec<&'a Expr>) {
+    if let Expr::Binary(operator, left, right) = expression
+        && operator == "and"
+    {
+        split_conjuncts(left, output);
+        split_conjuncts(right, output);
+    } else {
+        output.push(expression);
+    }
+}
+
+fn owned_conjuncts(expression: Expr, output: &mut Vec<Expr>) {
+    match expression {
+        Expr::Binary(operator, left, right) if operator == "and" => {
+            owned_conjuncts(*left, output);
+            owned_conjuncts(*right, output);
+        }
+        expression => output.push(expression),
+    }
+}
+
+fn expression_relations(
+    expression: &Expr,
+    bindings: &HashMap<String, String>,
+    output: &mut HashSet<String>,
+) -> bool {
+    match expression {
+        Expr::Column(column) | Expr::DictEq(column, _, _) => {
+            if let Ok((table, _)) = resolve_column(column, bindings) {
+                output.insert(table);
+                true
+            } else {
+                false
+            }
+        }
+        Expr::Unary(_, value) | Expr::Func(_, value) | Expr::IsNull(value, _) => {
+            expression_relations(value, bindings, output)
+        }
+        Expr::Binary(_, left, right) | Expr::Like(left, right, _) => {
+            expression_relations(left, bindings, output)
+                && expression_relations(right, bindings, output)
+        }
+        Expr::Call(_, values) => values
+            .iter()
+            .all(|value| expression_relations(value, bindings, output)),
+        Expr::Case(branches, fallback) => {
+            branches.iter().all(|(condition, value)| {
+                expression_relations(condition, bindings, output)
+                    && expression_relations(value, bindings, output)
+            }) && expression_relations(fallback, bindings, output)
+        }
+        Expr::Cast(value, _) => expression_relations(value, bindings, output),
+        Expr::InList(value, values, _) => {
+            expression_relations(value, bindings, output)
+                && values
+                    .iter()
+                    .all(|item| expression_relations(item, bindings, output))
+        }
+        Expr::Between(value, low, high, _) => {
+            expression_relations(value, bindings, output)
+                && expression_relations(low, bindings, output)
+                && expression_relations(high, bindings, output)
+        }
+        Expr::Window { .. }
+        | Expr::ScalarSubquery(_)
+        | Expr::Exists(_)
+        | Expr::InSubquery(_, _, _) => false,
+        _ => true,
+    }
+}
+
+fn column_literal_filter(expression: &Expr) -> Option<(&str, &str, &Expr, bool)> {
+    let Expr::Binary(operator, left, right) = expression else {
+        return None;
+    };
+    let literal = |value: &Expr| literal_value(value).is_some();
+    match (left.as_ref(), right.as_ref()) {
+        (Expr::Column(column), value) if literal(value) => Some((column, operator, value, true)),
+        (value, Expr::Column(column)) if literal(value) => Some((column, operator, value, false)),
+        _ => None,
+    }
+}
+
+fn equivalent_filter(expression: &Expr, from: &str, to: &str) -> Option<Expr> {
+    let (column, operator, literal, column_on_left) = column_literal_filter(expression)?;
+    if column != from {
+        return None;
+    }
+    Some(if column_on_left {
+        Expr::Binary(
+            operator.into(),
+            Box::new(Expr::Column(to.into())),
+            Box::new(literal.clone()),
+        )
+    } else {
+        Expr::Binary(
+            operator.into(),
+            Box::new(literal.clone()),
+            Box::new(Expr::Column(to.into())),
+        )
+    })
+}
+
+pub(crate) fn pushed_filters(query: &Query) -> Vec<PushedFilter> {
+    if !query.optimizer_enabled {
+        return Vec::new();
+    }
+    if query
+        .joins
+        .iter()
+        .any(|join| !matches!(join.kind, JoinKind::Inner | JoinKind::Cross))
+    {
+        return Vec::new();
+    }
+    let Ok(bindings) = query_bindings(query) else {
+        return Vec::new();
+    };
+    let mut output = Vec::new();
+    if let Some(filter) = &query.filter {
+        let mut conjuncts = Vec::new();
+        split_conjuncts(filter, &mut conjuncts);
+        for expression in conjuncts {
+            let mut relations = HashSet::new();
+            if expression_relations(expression, &bindings, &mut relations) && relations.len() == 1 {
+                output.push(PushedFilter {
+                    table: relations.into_iter().next().expect("single relation"),
+                    expression: expression.clone(),
+                    derived: false,
+                });
+            }
+        }
+    }
+    let seeds = output.clone();
+    for join in &query.joins {
+        if join.kind != JoinKind::Inner {
+            continue;
+        }
+        let Some(Expr::Binary(operator, left, right)) = join.on.as_ref() else {
+            continue;
+        };
+        if operator != "=" {
+            continue;
+        }
+        let (Expr::Column(left), Expr::Column(right)) = (left.as_ref(), right.as_ref()) else {
+            continue;
+        };
+        for seed in &seeds {
+            for (from, to) in [
+                (left.as_str(), right.as_str()),
+                (right.as_str(), left.as_str()),
+            ] {
+                let Some(expression) = equivalent_filter(&seed.expression, from, to) else {
+                    continue;
+                };
+                let Ok((table, _)) = resolve_column(to, &bindings) else {
+                    continue;
+                };
+                let key = format!("{table}:{expression:?}");
+                if output
+                    .iter()
+                    .any(|filter| format!("{}:{:?}", filter.table, filter.expression) == key)
+                {
+                    continue;
+                }
+                output.push(PushedFilter {
+                    table,
+                    expression,
+                    derived: true,
+                });
+            }
+        }
+    }
+    output
+}
+
+pub(crate) fn residual_filter(query: &Query) -> Option<Expr> {
+    let pushed: HashSet<_> = pushed_filters(query)
+        .into_iter()
+        .filter(|filter| !filter.derived)
+        .map(|filter| format!("{:?}", filter.expression))
+        .collect();
+    if pushed.is_empty() {
+        return query.filter.clone();
+    }
+    let mut conjuncts = Vec::new();
+    owned_conjuncts(query.filter.clone()?, &mut conjuncts);
+    let mut residuals = conjuncts
+        .into_iter()
+        .filter(|expression| !pushed.contains(&format!("{expression:?}")));
+    let mut residual = residuals.next()?;
+    for expression in residuals {
+        residual = Expr::Binary("and".into(), Box::new(residual), Box::new(expression));
+    }
+    Some(residual)
+}
+
+pub(crate) fn filter_always_false(filter: Option<&Expr>) -> bool {
+    matches!(filter, Some(Expr::Bool(false) | Expr::Null))
+}
+
+fn comparison_constraint(expression: &Expr) -> Option<(String, String, i64)> {
+    let Expr::Binary(operator, left, right) = expression else {
+        return None;
+    };
+    match (left.as_ref(), right.as_ref()) {
+        (Expr::Column(column), Expr::Int(value)) => {
+            Some((column.clone(), operator.clone(), *value))
+        }
+        (Expr::Int(value), Expr::Column(column)) => {
+            let flipped = match operator.as_str() {
+                "<" => ">",
+                "<=" => ">=",
+                ">" => "<",
+                ">=" => "<=",
+                value => value,
+            };
+            Some((column.clone(), flipped.into(), *value))
+        }
+        _ => None,
+    }
+}
+
+fn contradictory_filter(expression: &Expr) -> bool {
+    #[derive(Default)]
+    struct Bounds {
+        equal: Option<i64>,
+        lower: Option<(i64, bool)>,
+        upper: Option<(i64, bool)>,
+    }
+    let mut conjuncts = Vec::new();
+    split_conjuncts(expression, &mut conjuncts);
+    if conjuncts
+        .iter()
+        .any(|value| matches!(value, Expr::Bool(false) | Expr::Null))
+    {
+        return true;
+    }
+    let mut columns = HashMap::<String, Bounds>::new();
+    for conjunct in conjuncts {
+        let Some((column, operator, value)) = comparison_constraint(conjunct) else {
+            continue;
+        };
+        let bounds = columns.entry(column).or_default();
+        match operator.as_str() {
+            "=" => {
+                if bounds.equal.is_some_and(|existing| existing != value) {
+                    return true;
+                }
+                bounds.equal = Some(value);
+            }
+            ">" | ">=" => {
+                let candidate = (value, operator == ">=");
+                if bounds.lower.is_none_or(|current| {
+                    candidate.0 > current.0
+                        || (candidate.0 == current.0 && !candidate.1 && current.1)
+                }) {
+                    bounds.lower = Some(candidate);
+                }
+            }
+            "<" | "<=" => {
+                let candidate = (value, operator == "<=");
+                if bounds.upper.is_none_or(|current| {
+                    candidate.0 < current.0
+                        || (candidate.0 == current.0 && !candidate.1 && current.1)
+                }) {
+                    bounds.upper = Some(candidate);
+                }
+            }
+            _ => {}
+        }
+    }
+    columns.into_values().any(|bounds| {
+        if let Some(equal) = bounds.equal
+            && (bounds
+                .lower
+                .is_some_and(|(value, inclusive)| equal < value || (equal == value && !inclusive))
+                || bounds.upper.is_some_and(|(value, inclusive)| {
+                    equal > value || (equal == value && !inclusive)
+                }))
+        {
+            return true;
+        }
+        bounds.lower.zip(bounds.upper).is_some_and(
+            |((lower, lower_inclusive), (upper, upper_inclusive))| {
+                lower > upper || (lower == upper && !(lower_inclusive && upper_inclusive))
+            },
+        )
+    })
+}
+
+fn predicate_rank(expression: &Expr) -> usize {
+    match expression {
+        Expr::DictEq(_, _, _) => 0,
+        Expr::Binary(operator, left, right)
+            if ["=", "!=", "<", "<=", ">", ">="].contains(&operator.as_str())
+                && (literal_value(left).is_some() || literal_value(right).is_some()) =>
+        {
+            let non_literal = if literal_value(left).is_some() {
+                right.as_ref()
+            } else {
+                left.as_ref()
+            };
+            if matches!(non_literal, Expr::Column(_)) {
+                1
+            } else {
+                4
+            }
+        }
+        Expr::IsNull(_, _) | Expr::Between(_, _, _, _) | Expr::InList(_, _, _) => 2,
+        Expr::Like(_, _, _) | Expr::Func(_, _) | Expr::Call(_, _) => 4,
+        _ => 3,
+    }
+}
+
+fn reorder_conjuncts(filter: &mut Expr) -> bool {
+    let original = format!("{filter:?}");
+    let mut conjuncts = Vec::new();
+    owned_conjuncts(filter.clone(), &mut conjuncts);
+    if conjuncts.len() < 2 {
+        return false;
+    }
+    conjuncts.sort_by_key(predicate_rank);
+    let mut values = conjuncts.into_iter();
+    let mut rebuilt = values.next().expect("non-empty conjuncts");
+    for value in values {
+        rebuilt = Expr::Binary("and".into(), Box::new(rebuilt), Box::new(value));
+    }
+    let changed = original != format!("{rebuilt:?}");
+    *filter = rebuilt;
+    changed
+}
+
+fn estimated_filtered_rows(table: &str, filters: &[PushedFilter], event_rows: usize) -> usize {
+    let base = match table {
+        "events" => event_rows,
+        "users" => 250_000,
+        "campaigns" => 5_000,
+        _ => 1_000,
+    };
+    let mut estimate = base;
+    for filter in filters.iter().filter(|filter| filter.table == table) {
+        if let Some((column, operator, Expr::Int(value), column_on_left)) =
+            column_literal_filter(&filter.expression)
+        {
+            let operator = if column_on_left {
+                operator
+            } else {
+                match operator {
+                    "<" => ">",
+                    "<=" => ">=",
+                    ">" => "<",
+                    ">=" => "<=",
+                    value => value,
+                }
+            };
+            if column
+                .rsplit('.')
+                .next()
+                .is_some_and(|name| name.ends_with("_id"))
+            {
+                estimate = match operator {
+                    "=" => 1,
+                    "<" => estimate.min((*value).max(0) as usize),
+                    "<=" => estimate.min(value.saturating_add(1).max(0) as usize),
+                    ">" | ">=" => estimate.div_ceil(2),
+                    _ => estimate.div_ceil(10),
+                };
+                continue;
+            }
+        }
+        estimate = estimate.div_ceil(10);
+    }
+    estimate.max(1)
+}
 
 pub(crate) fn prepare_expr(e: &mut Expr, t: &Table) {
     match e {
@@ -249,13 +632,19 @@ pub(crate) fn optimize_expression(expression: &mut Expr) -> usize {
     rewrites
 }
 
-pub(crate) fn optimize_query(query: &mut Query) -> usize {
+pub(crate) fn optimize_query(query: &mut Query, event_rows: usize) -> usize {
     let mut rewrites = 0;
     for item in &mut query.select {
         rewrites += optimize_expression(&mut item.expr);
     }
     if let Some(filter) = &mut query.filter {
         rewrites += optimize_expression(filter);
+        if contradictory_filter(filter) {
+            *filter = Expr::Bool(false);
+            rewrites += 1;
+        } else if reorder_conjuncts(filter) {
+            rewrites += 1;
+        }
     }
     for join in &mut query.joins {
         if let Some(on) = &mut join.on {
@@ -290,6 +679,7 @@ pub(crate) fn optimize_query(query: &mut Query) -> usize {
         })
     });
     if query.optimizer_enabled && query.joins.len() > 1 && safe_star_reorder {
+        let filters = pushed_filters(query);
         let original: Vec<_> = query
             .joins
             .iter()
@@ -297,12 +687,7 @@ pub(crate) fn optimize_query(query: &mut Query) -> usize {
             .collect();
         query
             .joins
-            .sort_by_key(|join| match join.table.name.as_str() {
-                "campaigns" => 5_000,
-                "users" => 250_000,
-                "events" => 1_000_000,
-                _ => usize::MAX,
-            });
+            .sort_by_key(|join| estimated_filtered_rows(&join.table.name, &filters, event_rows));
         if original
             != query
                 .joins
@@ -318,8 +703,8 @@ pub(crate) fn optimize_query(query: &mut Query) -> usize {
 
 pub(crate) fn prepare(mut q: Query, t: &Table) -> Query {
     q.optimizer_enabled = std::env::var_os("DREMEL_DISABLE_OPTIMIZER").is_none();
-    let rewrites = if q.optimizer_enabled {
-        optimize_query(&mut q)
+    let mut rewrites = if q.optimizer_enabled {
+        optimize_query(&mut q, t.len())
     } else {
         0
     };
@@ -335,12 +720,43 @@ pub(crate) fn prepare(mut q: Query, t: &Table) -> Query {
     if let Some(having) = &mut q.having {
         prepare_expr(having, t);
     }
+    let mut scan_filters = Vec::new();
+    if q.optimizer_enabled {
+        let mut scan_operators = Vec::new();
+        if filter_always_false(q.filter.as_ref()) {
+            scan_operators.push("EmptyScanExec(reason=contradiction)".into());
+        }
+        let mut by_table = BTreeMap::<String, (usize, usize)>::new();
+        scan_filters = pushed_filters(&q);
+        rewrites += scan_filters.len();
+        for filter in &scan_filters {
+            let counts = by_table.entry(filter.table.clone()).or_default();
+            counts.0 += 1;
+            counts.1 += usize::from(filter.derived);
+        }
+        for (table, (predicates, derived)) in by_table {
+            scan_operators.push(format!(
+                "ScanFilterExec(table={table};predicates={predicates};derived={derived})"
+            ));
+        }
+        q.physical.splice(1..1, scan_operators);
+    }
     let mut estimate = match q.from.name.as_str() {
         "users" => 250_000,
         "campaigns" => 5_000,
         _ => t.len(),
     };
-    if q.filter.is_some() {
+    if filter_always_false(q.filter.as_ref()) {
+        estimate = 0;
+    } else if q.optimizer_enabled {
+        if scan_filters.is_empty() {
+            if q.filter.is_some() {
+                estimate = estimate.div_ceil(10);
+            }
+        } else {
+            estimate = estimated_filtered_rows(&q.from.name, &scan_filters, t.len());
+        }
+    } else if q.filter.is_some() {
         estimate = estimate.div_ceil(10);
     }
     if q.limit.is_some() {
@@ -364,7 +780,7 @@ pub(crate) fn prepare(mut q: Query, t: &Table) -> Query {
     };
     q.physical.push(statistics);
     q.physical.push(if q.optimizer_enabled {
-        format!("OptimizerExec(rewrites={rewrites};rules=constant_folding+3vl+projection_pruning+predicate_pushdown+aggregate_filter_ordering+join_ordering+join_selection+runtime_filter+topk)")
+        format!("OptimizerExec(rewrites={rewrites};rules=constant_folding+3vl+projection_pruning+predicate_pushdown+transitive_predicates+range_contradiction+filter_ordering+selectivity_join_order+join_selection+runtime_filter+topk)")
     } else {
         "OptimizerExec(disabled=true)".into()
     });

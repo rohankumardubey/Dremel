@@ -156,18 +156,24 @@ static Scalar eval(const ExprPtr &e, const Table &t, std::size_t i) {
     break;
   }
   if (e->text == "and") {
-    auto left = sql_bool(eval(e->left, t, i));
+    const auto left_value = eval(e->left, t, i);
+    auto left = sql_bool(left_value);
+    if (left == false)
+      return false;
     auto right = sql_bool(eval(e->right, t, i));
-    if (left == false || right == false)
+    if (right == false)
       return false;
     if (left == true && right == true)
       return true;
     return std::monostate{};
   }
   if (e->text == "or") {
-    auto left = sql_bool(eval(e->left, t, i));
+    const auto left_value = eval(e->left, t, i);
+    auto left = sql_bool(left_value);
+    if (left == true)
+      return true;
     auto right = sql_bool(eval(e->right, t, i));
-    if (left == true || right == true)
+    if (right == true)
       return true;
     if (left == false && right == false)
       return false;

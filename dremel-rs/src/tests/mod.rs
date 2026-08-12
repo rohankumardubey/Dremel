@@ -362,7 +362,7 @@ fn optimizer_reorders_only_safe_star_joins() {
     .parse()
     .unwrap();
     star.optimizer_enabled = true;
-    assert_eq!(optimize_query(&mut star), 1);
+    assert_eq!(optimize_query(&mut star, 1_000_000), 1);
     assert_eq!(star.joins[0].table.name, "campaigns");
     assert_eq!(star.joins[1].table.name, "users");
 
@@ -373,7 +373,7 @@ fn optimizer_reorders_only_safe_star_joins() {
     .parse()
     .unwrap();
     dependent.optimizer_enabled = true;
-    assert_eq!(optimize_query(&mut dependent), 0);
+    assert_eq!(optimize_query(&mut dependent, 1_000_000), 0);
     assert_eq!(dependent.joins[0].table.name, "users");
     assert_eq!(dependent.joins[1].table.name, "campaigns");
 }

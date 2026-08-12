@@ -865,17 +865,25 @@ static Rows execute_rel_inner(const Query &query, const Catalog &catalog,
     return rows;
   }
   const auto bindings = bind_query(query);
-  auto relation = base_relation_rows(query.from.name, catalog);
+  const auto scan_filters = pushed_filters(query);
+  const auto residual = residual_filter(query);
+  const bool impossible = filter_always_false(query.filter);
+  auto relation = impossible
+                      ? std::vector<RelRow>{}
+                      : base_relation_rows_filtered(query.from.name, catalog,
+                                                    bindings, scan_filters);
   for (auto &join : query.joins) {
+    if (impossible)
+      break;
     relation = apply_join(std::move(relation), join, catalog, bindings,
-                          query.optimizer_enabled);
+                          query.optimizer_enabled, scan_filters);
     if (execution_cancelled())
       return {};
   }
-  if (query.filter)
+  if (!impossible && residual)
     std::erase_if(relation, [&](const RelRow &row) {
       return execution_cancelled() ||
-             !truthy(eval_rel(query.filter, catalog, row, bindings));
+             !truthy(eval_rel(residual, catalog, row, bindings));
     });
   const bool aggregate =
       !query.group_by.empty() || contains_agg(query.having) ||
@@ -1163,6 +1171,8 @@ static Rows execute(const Query &q, const std::shared_ptr<Table> &t,
       rows.push_back(std::move(row));
     }
   } else {
+    if (filter_always_false(q.filter))
+      return rows;
     bool done = false;
     std::vector<std::size_t> selection;
     account_query_memory(std::max<std::size_t>(1, batch) * sizeof(std::size_t),

@@ -3,7 +3,7 @@ pub(crate) mod scalar;
 
 use crate::execution::aggregate::*;
 use crate::execution::scalar::eval;
-use crate::optimizer::prepare;
+use crate::optimizer::{filter_always_false, prepare};
 use crate::relational::{execute_rel, finalize_rows};
 use crate::sql::*;
 use crate::storage::*;
@@ -49,6 +49,9 @@ pub(crate) fn execute(
             rows.push(row)
         }
     } else {
+        if filter_always_false(q.filter.as_ref()) {
+            return Ok(rows);
+        }
         account_query_memory(
             batch.max(1).saturating_mul(std::mem::size_of::<usize>()),
             "scan selection",
