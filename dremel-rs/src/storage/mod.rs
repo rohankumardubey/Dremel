@@ -8,7 +8,7 @@ use std::sync::Arc;
 mod interoperable;
 pub(crate) use interoperable::ParquetScanMetrics;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Dictionary {
     pub(crate) values: Vec<String>,
     pub(crate) ids: std::collections::HashMap<String, u32>,
@@ -712,6 +712,17 @@ impl Table {
         batch_size: usize,
     ) -> Result<(Self, ParquetScanMetrics), String> {
         interoperable::load_parquet_direct(path, query, batch_size)
+    }
+    pub(crate) fn stream_parquet_direct<F>(
+        path: &str,
+        query: &Query,
+        batch_size: usize,
+        consume: F,
+    ) -> Result<(Self, ParquetScanMetrics), String>
+    where
+        F: FnMut(Self) -> Result<(), String>,
+    {
+        interoperable::stream_parquet_direct(path, query, batch_size, consume)
     }
     pub(crate) fn parquet_scan_plan(
         path: &str,

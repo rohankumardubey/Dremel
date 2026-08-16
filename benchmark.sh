@@ -21,7 +21,7 @@ OPTIMIZER="${OPTIMIZER:-1}"
 CONCURRENCY="${CONCURRENCY:-1}"
 STORAGE="${STORAGE:-1}"
 MEMORY_BOUNDED="${MEMORY_BOUNDED:-1}"
-PARQUET_DIRECT="${PARQUET_DIRECT:-1}"
+PARQUET="${PARQUET:-${PARQUET_DIRECT:-1}}"
 QUERY_MEMORY_LIMIT_MB="${QUERY_MEMORY_LIMIT_MB:-256}"
 REPORT_OPEN="${REPORT_OPEN:-auto}"
 export LTO NATIVE BENCH_CPUSET CPP_STANDARD
@@ -166,7 +166,7 @@ if [[ "$STORAGE" == 1 ]]; then
   "$PYTHON" scripts/summarize_storage_benchmark.py
 fi
 
-if [[ "$PARQUET_DIRECT" == 1 ]]; then
+if [[ "$PARQUET" == 1 ]]; then
   "$PYTHON" scripts/run_parquet_benchmark.py \
     --data data/events-snappy.parquet --threads "$BENCH_THREADS" \
     --batch-size "$BATCH_SIZE" --warmup "$WARMUP" \
@@ -189,7 +189,7 @@ if [[ "$SQL_V1" == 1 ]]; then REPORT_ARGS+=(--include sql); fi
 if [[ "$OPTIMIZER" == 1 ]]; then REPORT_ARGS+=(--include optimizer); fi
 if [[ "$CONCURRENCY" == 1 ]]; then REPORT_ARGS+=(--include concurrency); fi
 if [[ "$STORAGE" == 1 ]]; then REPORT_ARGS+=(--include storage); fi
-if [[ "$PARQUET_DIRECT" == 1 ]]; then REPORT_ARGS+=(--include parquet); fi
+if [[ "$PARQUET" == 1 ]]; then REPORT_ARGS+=(--include parquet); fi
 if [[ "$MEMORY_BOUNDED" == 1 ]]; then REPORT_ARGS+=(--include memory); fi
 
 if [[ "$REPORT_OPEN" == 1 || ( "$REPORT_OPEN" == auto && -t 1 ) ]]; then

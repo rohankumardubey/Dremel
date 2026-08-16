@@ -5,7 +5,8 @@
     "file": "queries/P001.sql",
     "description": "SELECT COUNT(*) FROM events",
     "expected_columns_read": 0,
-    "maximum_row_groups_read": 16
+    "maximum_row_groups_read": 16,
+    "expected_streaming_fallback": false
   },
   {
     "query_id": "P002",
@@ -13,7 +14,8 @@
     "file": "queries/P002.sql",
     "description": "SELECT COUNT(*) FROM events WHERE event_id <= 100000",
     "expected_columns_read": 1,
-    "maximum_row_groups_read": 2
+    "maximum_row_groups_read": 2,
+    "expected_streaming_fallback": false
   },
   {
     "query_id": "P003",
@@ -21,7 +23,8 @@
     "file": "queries/P003.sql",
     "description": "SELECT SUM(bytes) FROM events WHERE event_id BETWEEN 200000 AND 260000",
     "expected_columns_read": 2,
-    "maximum_row_groups_read": 2
+    "maximum_row_groups_read": 2,
+    "expected_streaming_fallback": false
   },
   {
     "query_id": "P004",
@@ -29,7 +32,8 @@
     "file": "queries/P004.sql",
     "description": "SELECT country, COUNT(*) FROM events WHERE country = 'IN' GROUP BY country",
     "expected_columns_read": 1,
-    "maximum_row_groups_read": 16
+    "maximum_row_groups_read": 16,
+    "expected_streaming_fallback": false
   },
   {
     "query_id": "P005",
@@ -37,7 +41,8 @@
     "file": "queries/P005.sql",
     "description": "SELECT AVG(score) FROM events WHERE event_id >= 900000 AND event_id < 920000",
     "expected_columns_read": 2,
-    "maximum_row_groups_read": 2
+    "maximum_row_groups_read": 2,
+    "expected_streaming_fallback": false
   },
   {
     "query_id": "P006",
@@ -45,7 +50,8 @@
     "file": "queries/P006.sql",
     "description": "SELECT COUNT(campaign_id) FROM events WHERE campaign_id IS NULL",
     "expected_columns_read": 1,
-    "maximum_row_groups_read": 16
+    "maximum_row_groups_read": 16,
+    "expected_streaming_fallback": false
   },
   {
     "query_id": "P007",
@@ -53,7 +59,8 @@
     "file": "queries/P007.sql",
     "description": "SELECT SUM(bytes), AVG(score), MIN(duration_ms), MAX(timestamp), COUNT(campaign_id) FROM events WHERE event_id <= 100000",
     "expected_columns_read": 6,
-    "maximum_row_groups_read": 2
+    "maximum_row_groups_read": 2,
+    "expected_streaming_fallback": false
   },
   {
     "query_id": "P008",
@@ -61,7 +68,8 @@
     "file": "queries/P008.sql",
     "description": "SELECT u.segment, COUNT(*) FROM events e JOIN users u ON e.user_id = u.user_id WHERE e.event_id <= 100000 GROUP BY u.segment ORDER BY u.segment",
     "expected_columns_read": 2,
-    "maximum_row_groups_read": 2
+    "maximum_row_groups_read": 2,
+    "expected_streaming_fallback": true
   },
   {
     "query_id": "P009",
@@ -69,6 +77,25 @@
     "file": "queries/P009.sql",
     "description": "SELECT event_id, ROW_NUMBER() OVER (PARTITION BY country ORDER BY score DESC, event_id ASC) FROM events WHERE event_id <= 500 ORDER BY event_id",
     "expected_columns_read": 3,
-    "maximum_row_groups_read": 1
+    "maximum_row_groups_read": 1,
+    "expected_streaming_fallback": true
+  },
+  {
+    "query_id": "P010",
+    "category": "streaming_top_k",
+    "file": "queries/P010.sql",
+    "description": "SELECT event_id, country, score FROM events WHERE event_id BETWEEN 200000 AND 201000 ORDER BY score DESC, event_id ASC LIMIT 25 OFFSET 5",
+    "expected_columns_read": 3,
+    "maximum_row_groups_read": 1,
+    "expected_streaming_fallback": false
+  },
+  {
+    "query_id": "P011",
+    "category": "streaming_distinct",
+    "file": "queries/P011.sql",
+    "description": "SELECT DISTINCT country FROM events ORDER BY country",
+    "expected_columns_read": 1,
+    "maximum_row_groups_read": 16,
+    "expected_streaming_fallback": false
   }
 ]

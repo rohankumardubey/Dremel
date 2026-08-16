@@ -11,6 +11,7 @@ ENGINES = [
     ROOT / "dremel-cpp/build/dremel-cpp",
 ]
 DATA = ROOT / "data/events.dremel"
+PARQUET_DATA = ROOT / "data/events-snappy.parquet"
 
 
 def run(engine: Path, limit_mb: int, sql: str, stats: bool = False):
@@ -26,6 +27,24 @@ def run(engine: Path, limit_mb: int, sql: str, stats: bool = False):
     ]
     if stats:
         command.append("--stats")
+    return subprocess.run(command, text=True, capture_output=True, check=False)
+
+
+def run_parquet(engine: Path, streaming: bool):
+    command = [
+        str(engine),
+        "query",
+        "--data",
+        str(PARQUET_DATA),
+        "--memory-limit-mb",
+        "1",
+        "--batch-size",
+        "4096",
+        "--sql",
+        "SELECT SUM(bytes), AVG(score), MIN(duration_ms), MAX(timestamp), "
+        "COUNT(campaign_id) FROM events WHERE event_id <= 100000",
+    ]
+    command.append("--streaming-parquet" if streaming else "--direct-parquet")
     return subprocess.run(command, text=True, capture_output=True, check=False)
 
 
@@ -107,7 +126,19 @@ for engine in ENGINES:
         engine,
         join.stderr,
     )
+
+    parquet_stream = run_parquet(engine, True)
+    assert parquet_stream.returncode == 0, (engine, parquet_stream.stderr)
+
+    parquet_materialized = run_parquet(engine, False)
+    assert (
+        parquet_materialized.returncode != 0
+        and "RESOURCE_EXHAUSTED" in parquet_materialized.stderr
+    ), (
+        engine,
+        parquet_materialized.stderr,
+    )
     server_round_trip(engine)
     print(f"{engine.name}: memory-bounded execution PASS")
 
-print("Memory-bounded execution: 12 / 12 PASS")
+print("Memory-bounded execution: 16 / 16 PASS")

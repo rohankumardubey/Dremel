@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create direct Parquet projection and row-group pruning benchmarks."""
+"""Create Parquet projection, pruning, and streaming benchmarks."""
 
 from __future__ import annotations
 
@@ -71,6 +71,20 @@ QUERIES = [
         3,
         1,
     ),
+    (
+        "P010",
+        "streaming_top_k",
+        "SELECT event_id, country, score FROM events WHERE event_id BETWEEN 200000 AND 201000 ORDER BY score DESC, event_id ASC LIMIT 25 OFFSET 5",
+        3,
+        1,
+    ),
+    (
+        "P011",
+        "streaming_distinct",
+        "SELECT DISTINCT country FROM events ORDER BY country",
+        1,
+        16,
+    ),
 ]
 
 base = ROOT / "benchmark" / "parquet"
@@ -87,7 +101,8 @@ for query_id, category, sql, expected_columns, maximum_row_groups in QUERIES:
             "description": sql,
             "expected_columns_read": expected_columns,
             "maximum_row_groups_read": maximum_row_groups,
+            "expected_streaming_fallback": query_id in ("P008", "P009"),
         }
     )
 (base / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-print(f"created {len(manifest)} direct Parquet benchmark queries")
+print(f"created {len(manifest)} Parquet benchmark queries")

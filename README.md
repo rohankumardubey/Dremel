@@ -14,10 +14,10 @@ It is an independent implementation and is not Google Dremel or BigQuery.
 | Area | Implementation |
 | --- | --- |
 | Engines | Rust 1.97.1 (Rust 2024) and LLVM Clang 22.1.8 (C++26) |
-| Storage | DREMCOL1, Arrow IPC, and direct Apache Parquet projection with row-group pruning |
-| Execution | Batched scans, selection vectors, partitioned aggregation, joins and windows |
+| Storage | DREMCOL1, Arrow IPC, and Apache Parquet projection with row-group pruning |
+| Execution | Bounded Parquet streaming, batched scans, partitioned aggregation, joins and windows |
 | Optimizer | Scan filters, transitive predicates, pruning, contradiction elimination, selectivity-aware join ordering and Top-K |
-| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer, 9 Parquet and 5 concurrency cases |
+| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer, 11 Parquet and 5 concurrency cases |
 | Validation | Cross-engine typed results, SQLite differential tests and plan assertions |
 
 The toolchains are pinned so a later compiler update does not silently change
@@ -81,7 +81,7 @@ NATIVE=1 \
 ```
 
 `EXTENDED`, `SQL_V1`, `OPTIMIZER`, `CONCURRENCY`, `STORAGE`,
-`MEMORY_BOUNDED`, and `PARQUET_DIRECT` default to `1`.
+`MEMORY_BOUNDED`, and `PARQUET` default to `1`.
 Set any of them to `0` to skip that suite. The storage suite verifies equal
 typed results and benchmarks full-file load plus in-memory execution for
 DREMCOL1, Arrow IPC, Parquet Snappy, and Parquet Zstd. On Linux,
@@ -131,14 +131,27 @@ official Parquet min/max/null statistics cannot satisfy supported predicates:
   --sql "SELECT SUM(bytes) FROM events WHERE event_id <= 100000" --stats
 ```
 
+Use `--streaming-parquet` instead to pass projected Parquet record batches
+directly into scans and aggregates. `--batch-size` sets the maximum decoded
+batch size, and `--stats` reports the batch count, peak decoded batch bytes,
+and whether the query used the materialized fallback. Joins, windows, CTEs,
+subqueries, `UNION`, and `HAVING` currently use that fallback.
+
+```bash
+./dremel-cpp/build/dremel-cpp query \
+  --data data/events-snappy.parquet --streaming-parquet --batch-size 4096 \
+  --sql "SELECT country, COUNT(*) FROM events GROUP BY country" --stats
+```
+
 `users` and `campaigns` are loaded from matching Arrow or Parquet files when a
 query uses those tables. The files are generated deterministically by official
 PyArrow and read through the official Rust and C++ Arrow/Parquet libraries.
 
 Use `--stats` for scan and execution counters. `--memory-limit-mb` limits the
-loaded table, while `--query-memory-limit-mb` places a hard cap on accounted
-query workspace. Hash aggregation, joins, distinct sets, windows, intermediate
-relations, scan selections, and result rows participate in the cap.
+loaded or materialized table and each decoded streaming batch, while
+`--query-memory-limit-mb` places a hard cap on accounted query workspace. Hash
+aggregation, joins, distinct sets, windows, intermediate relations, scan
+selections, and result rows participate in the cap.
 Optimized `ORDER BY ... LIMIT` queries retain only `limit + offset` rows. A
 query that cannot stay inside the cap returns `RESOURCE_EXHAUSTED`; `0` keeps
 the query cap disabled. `--max-result-rows` provides a separate result
@@ -186,11 +199,11 @@ provides a Linux correctness environment; do not mix Docker measurements with
 native host measurements.
 
 The default Arrow and Parquet path remains an eager full-file control. Direct
-Parquet mode performs query-time column projection and row-group pruning, then
-decodes selected row groups into the existing in-memory execution operators.
-Page-index pruning and a fully streaming Parquet-to-operator pipeline remain
-future work. Distributed exchange, durable spill/recovery, transactions, and
-database wire protocols are also outside the current scope.
+Parquet mode materializes only projected columns and selected row groups.
+Streaming Parquet keeps simple event scans and aggregates batch bounded while
+retaining the same projection and pruning rules. Page-index pruning, streaming
+relational operators, distributed exchange, durable spill/recovery,
+transactions, and database wire protocols remain outside the current scope.
 
 The main benchmark also runs `benchmark/memory/manifest.json` with a 256 MiB
 query workspace cap. Set `MEMORY_BOUNDED=0` to skip that suite or change the

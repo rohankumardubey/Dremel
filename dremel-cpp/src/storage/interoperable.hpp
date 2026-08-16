@@ -12,11 +12,14 @@ namespace dremel {
 
 struct ParquetScanMetrics {
   std::size_t total_rows{}, rows_read{}, total_row_groups{}, row_groups_read{},
-      total_columns{}, columns_read{}, compressed_bytes_read{};
+      total_columns{}, columns_read{}, compressed_bytes_read{}, batches_read{},
+      peak_decoded_batch_bytes{};
+  bool streaming_fallback{};
 };
 
 static std::shared_ptr<Table>
-materialize_projected_arrow_table(const std::shared_ptr<arrow::Table> &source);
+materialize_projected_arrow_table(const std::shared_ptr<arrow::Table> &source,
+                                  const Table *dictionary_seed = nullptr);
 
 template <class T> static T arrow_value(arrow::Result<T> result) {
   if (!result.ok())
@@ -168,8 +171,14 @@ materialize_arrow_table(const std::shared_ptr<arrow::Table> &source) {
 }
 
 static std::shared_ptr<Table>
-materialize_projected_arrow_table(const std::shared_ptr<arrow::Table> &source) {
+materialize_projected_arrow_table(const std::shared_ptr<arrow::Table> &source,
+                                  const Table *dictionary_seed) {
   auto table = std::make_shared<Table>();
+  if (dictionary_seed) {
+    table->country_dict = dictionary_seed->country_dict;
+    table->device_dict = dictionary_seed->device_dict;
+    table->event_dict = dictionary_seed->event_dict;
+  }
   table->logical_rows = static_cast<std::size_t>(source->num_rows());
   const auto append_if_present = [&](const std::string &name, auto &&append) {
     if (const auto column = source->GetColumnByName(name))
@@ -560,15 +569,89 @@ static ParquetScanMetrics parquet_scan_plan(const std::string &path,
   return parquet_scan_selection(path, query).metrics;
 }
 
+template <class T>
+static void append_projected_values(std::vector<T> &target,
+                                    std::vector<T> &source) {
+  target.insert(target.end(), std::make_move_iterator(source.begin()),
+                std::make_move_iterator(source.end()));
+}
+
+static void append_projected_table(Table &target, Table source) {
+  target.logical_rows += source.logical_rows;
+  target.country_dict = std::move(source.country_dict);
+  target.device_dict = std::move(source.device_dict);
+  target.event_dict = std::move(source.event_dict);
+  append_projected_values(target.event_id, source.event_id);
+  append_projected_values(target.user_id, source.user_id);
+  append_projected_values(target.timestamp, source.timestamp);
+  append_projected_values(target.duration, source.duration);
+  append_projected_values(target.bytes, source.bytes);
+  append_projected_values(target.campaign, source.campaign);
+  append_projected_values(target.score, source.score);
+  append_projected_values(target.country, source.country);
+  append_projected_values(target.device, source.device);
+  append_projected_values(target.event_type, source.event_type);
+  append_projected_values(target.success, source.success);
+  append_projected_values(target.campaign_def, source.campaign_def);
+}
+
 static std::pair<std::shared_ptr<Table>, ParquetScanMetrics>
-load_parquet_direct(const std::string &path, const Query &query) {
+load_parquet_direct(const std::string &path, const Query &query,
+                    std::size_t batch_size) {
   auto selection = parquet_scan_selection(path, query);
   auto input = arrow_value(arrow::io::ReadableFile::Open(path));
   auto reader = arrow_value(
       parquet::arrow::OpenFile(input, arrow::default_memory_pool()));
-  const auto source = arrow_value(
-      reader->ReadRowGroups(selection.row_groups, selection.columns));
-  return {materialize_projected_arrow_table(source), selection.metrics};
+  reader->set_batch_size(static_cast<std::int64_t>(
+      std::max<std::size_t>(1, batch_size)));
+  auto batches = arrow_value(reader->GetRecordBatchReader(
+      selection.row_groups, selection.columns));
+  auto table = std::make_shared<Table>();
+  for (;;) {
+    auto batch = arrow_value(batches->Next());
+    if (!batch)
+      break;
+    const auto source =
+        arrow_value(arrow::Table::FromRecordBatches({std::move(batch)}));
+    auto projected = materialize_projected_arrow_table(source, table.get());
+    append_projected_table(*table, std::move(*projected));
+    ++selection.metrics.batches_read;
+    selection.metrics.peak_decoded_batch_bytes = table->approximate_bytes();
+  }
+  return {std::move(table), selection.metrics};
+}
+
+template <class Consume>
+static std::pair<std::shared_ptr<Table>, ParquetScanMetrics>
+stream_parquet_direct(const std::string &path, const Query &query,
+                      std::size_t batch_size, Consume consume) {
+  auto selection = parquet_scan_selection(path, query);
+  auto input = arrow_value(arrow::io::ReadableFile::Open(path));
+  auto reader = arrow_value(
+      parquet::arrow::OpenFile(input, arrow::default_memory_pool()));
+  reader->set_batch_size(static_cast<std::int64_t>(
+      std::max<std::size_t>(1, batch_size)));
+  auto batches = arrow_value(reader->GetRecordBatchReader(
+      selection.row_groups, selection.columns));
+  auto dictionaries = std::make_shared<Table>();
+  for (;;) {
+    auto batch = arrow_value(batches->Next());
+    if (!batch)
+      break;
+    const auto source =
+        arrow_value(arrow::Table::FromRecordBatches({std::move(batch)}));
+    auto table = materialize_projected_arrow_table(source, dictionaries.get());
+    dictionaries->country_dict = table->country_dict;
+    dictionaries->device_dict = table->device_dict;
+    dictionaries->event_dict = table->event_dict;
+    ++selection.metrics.batches_read;
+    selection.metrics.peak_decoded_batch_bytes =
+        std::max(selection.metrics.peak_decoded_batch_bytes,
+                 table->approximate_bytes());
+    consume(std::move(table));
+  }
+  dictionaries->logical_rows = selection.metrics.rows_read;
+  return {std::move(dictionaries), selection.metrics};
 }
 
 static UsersTable load_users_interoperable(const std::string &path) {

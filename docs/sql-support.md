@@ -46,7 +46,7 @@ pushed safely remain as residual filters above joins.
 Set `DREMEL_DISABLE_OPTIMIZER=1` to build a comparable unoptimized plan.
 `EXPLAIN` shows physical operators, estimates, join choices, and applied rules.
 
-## Direct Parquet execution
+## Parquet execution
 
 `--direct-parquet` keeps only Parquet file metadata resident at startup. Each
 query requests its referenced event columns from the official Rust or C++
@@ -59,8 +59,20 @@ from file metadata, not an operating-system I/O counter. Query `--stats`
 reports the same scan counters.
 
 The selected row groups are decoded into the existing in-memory operators.
-Dimension tables used by joins retain the existing load path. Async scheduler
-submissions do not yet use direct Parquet mode.
+Dimension tables used by joins retain the existing load path.
+
+`--streaming-parquet` uses the same projection and pruning plan but decodes at
+most `--batch-size` rows through the official Arrow record-batch reader before
+passing the batch to a scan or aggregate operator. Dictionary identifiers stay
+stable between batches, and final ordering, distinctness, limits, and offsets
+are applied across the complete result. Metadata-only `COUNT(*)` decodes no
+data batches. Query stats include batches read, peak decoded batch bytes, and
+the fallback state.
+
+Joins, windows, CTEs, subqueries, `UNION`, and `HAVING` fall back to the
+materialized direct path so they preserve the full SQL behavior. Direct and
+streaming flags are mutually exclusive. Async scheduler submissions do not yet
+use either Parquet query mode.
 
 ## Concurrent execution
 

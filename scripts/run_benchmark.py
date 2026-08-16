@@ -129,6 +129,14 @@ class Server:
                     map(int, p[6:13]),
                 )
             )
+        if len(p) >= 16:
+            self.last_scan_metrics.update(
+                {
+                    "batches_read": int(p[13]),
+                    "peak_decoded_batch_bytes": int(p[14]),
+                    "streaming_fallback": p[15].lower() in ("1", "true"),
+                }
+            )
         return int(p[1]), json.loads(p[3])
 
     def e2e(self, qid: str, sql: str) -> int:

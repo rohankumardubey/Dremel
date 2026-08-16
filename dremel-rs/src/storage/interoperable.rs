@@ -36,6 +36,9 @@ pub(crate) struct ParquetScanMetrics {
     pub(crate) total_columns: usize,
     pub(crate) columns_read: usize,
     pub(crate) compressed_bytes_read: usize,
+    pub(crate) batches_read: usize,
+    pub(crate) peak_decoded_batch_bytes: usize,
+    pub(crate) streaming_fallback: bool,
 }
 
 const EVENT_COLUMNS: [&str; 11] = [
@@ -313,6 +316,7 @@ fn parquet_scan_selection(
         total_columns: metadata.file_metadata().schema_descr().num_columns(),
         columns_read: columns.len(),
         compressed_bytes_read,
+        ..ParquetScanMetrics::default()
     };
     Ok((columns, row_groups, metrics))
 }
@@ -326,7 +330,7 @@ pub(crate) fn load_parquet_direct(
     query: &Query,
     batch_size: usize,
 ) -> Result<(Table, ParquetScanMetrics), String> {
-    let (columns, row_groups, metrics) = parquet_scan_selection(path, query)?;
+    let (columns, row_groups, mut metrics) = parquet_scan_selection(path, query)?;
     let file = File::open(path).map_err(|error| format!("cannot open {path}: {error}"))?;
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(file).map_err(|error| error.to_string())?;
@@ -340,8 +344,56 @@ pub(crate) fn load_parquet_direct(
     let mut table = Table::empty();
     for batch in reader {
         append_projected_batch(&mut table, &batch.map_err(|error| error.to_string())?)?;
+        metrics.batches_read += 1;
+        metrics.peak_decoded_batch_bytes = table.approximate_bytes();
     }
     Ok((table, metrics))
+}
+
+pub(crate) fn stream_parquet_direct<F>(
+    path: &str,
+    query: &Query,
+    batch_size: usize,
+    mut consume: F,
+) -> Result<(Table, ParquetScanMetrics), String>
+where
+    F: FnMut(Table) -> Result<(), String>,
+{
+    let (columns, row_groups, mut metrics) = parquet_scan_selection(path, query)?;
+    let file = File::open(path).map_err(|error| format!("cannot open {path}: {error}"))?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|error| error.to_string())?;
+    let projection = ProjectionMask::leaves(builder.parquet_schema(), columns);
+    let reader = builder
+        .with_batch_size(batch_size.max(1))
+        .with_projection(projection)
+        .with_row_groups(row_groups)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut country = super::Dictionary::default();
+    let mut device = super::Dictionary::default();
+    let mut event = super::Dictionary::default();
+    for batch in reader {
+        let mut table = Table::empty();
+        table.country_dict = country;
+        table.device_dict = device;
+        table.event_dict = event;
+        append_projected_batch(&mut table, &batch.map_err(|error| error.to_string())?)?;
+        country = table.country_dict.clone();
+        device = table.device_dict.clone();
+        event = table.event_dict.clone();
+        metrics.batches_read += 1;
+        metrics.peak_decoded_batch_bytes = metrics
+            .peak_decoded_batch_bytes
+            .max(table.approximate_bytes());
+        consume(table)?;
+    }
+    let mut dictionaries = Table::empty();
+    dictionaries.logical_rows = metrics.rows_read;
+    dictionaries.country_dict = country;
+    dictionaries.device_dict = device;
+    dictionaries.event_dict = event;
+    Ok((dictionaries, metrics))
 }
 
 fn read_batches(path: &Path) -> Result<Vec<RecordBatch>, String> {

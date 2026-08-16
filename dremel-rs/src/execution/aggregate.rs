@@ -383,7 +383,7 @@ impl Pool {
         t: Arc<Table>,
         batch: usize,
     ) -> Result<GroupTable, String> {
-        let parts = self.threads * 4;
+        let parts = (self.threads * 4).min(t.len().div_ceil(batch.max(1)).max(1));
         let (tx, rx) = mpsc::channel();
         for p in 0..parts {
             let n = t.len();

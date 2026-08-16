@@ -23,6 +23,26 @@ pub(crate) fn row_bytes(row: &Vec<Scalar>) -> usize {
             .sum::<usize>()
 }
 
+fn finish_group_rows(q: &Query, t: &Table, groups: GroupTable) -> Result<Vec<Vec<Scalar>>, String> {
+    let mut rows = Vec::new();
+    for e in groups.into_entries() {
+        let mut row = Vec::new();
+        let mut ai = 0;
+        for item in &q.select {
+            if is_agg(&item.expr) {
+                row.push(finish(&e.s[ai]));
+                ai += 1
+            } else if let Expr::Column(c) = &item.expr {
+                let ki = q.group_by.iter().position(|x| x == c).expect("grouped");
+                row.push(t.key_scalar(c, e.k.v[ki]))
+            }
+        }
+        account_query_memory(row_bytes(&row), "result materialization")?;
+        rows.push(row)
+    }
+    Ok(rows)
+}
+
 pub(crate) fn execute(
     q: &Query,
     t: Arc<Table>,
@@ -33,21 +53,7 @@ pub(crate) fn execute(
     let mut rows = Vec::new();
     if aggregate {
         let groups = pool.aggregate(Arc::new(q.clone()), t.clone(), batch)?;
-        for e in groups.into_entries() {
-            let mut row = Vec::new();
-            let mut ai = 0;
-            for item in &q.select {
-                if is_agg(&item.expr) {
-                    row.push(finish(&e.s[ai]));
-                    ai += 1
-                } else if let Expr::Column(c) = &item.expr {
-                    let ki = q.group_by.iter().position(|x| x == c).expect("grouped");
-                    row.push(t.key_scalar(c, e.k.v[ki]))
-                }
-            }
-            account_query_memory(row_bytes(&row), "result materialization")?;
-            rows.push(row)
-        }
+        rows = finish_group_rows(q, &t, groups)?;
     } else {
         if filter_always_false(q.filter.as_ref()) {
             return Ok(rows);
@@ -136,6 +142,82 @@ pub(crate) fn execute(
     finalize_rows(q, &mut rows);
     Ok(rows)
 }
+
+pub(crate) fn execute_parquet_stream(
+    q: &Query,
+    path: &str,
+    pool: &Pool,
+    options: &Options,
+) -> Result<(Vec<Vec<Scalar>>, ParquetScanMetrics), String> {
+    if is_relational(q) {
+        let (table, mut scan) = Table::load_parquet_direct(path, q, options.batch_size)?;
+        scan.streaming_fallback = true;
+        let table = Arc::new(table);
+        enforce_table_limit(options, &table)?;
+        let rows = execute_rel(q, &Catalog::load(path, table)?)?;
+        return Ok((rows, scan));
+    }
+    let metadata_count = q.select.len() == 1
+        && q.filter.is_none()
+        && q.group_by.is_empty()
+        && q.having.is_none()
+        && matches!(&q.select[0].expr, Expr::Func(name, argument)
+            if name == "count" && matches!(argument.as_ref(), Expr::Star));
+    if metadata_count {
+        let scan = Table::parquet_scan_plan(path, q)?;
+        let mut rows = vec![vec![Scalar::Int(scan.rows_read as i64)]];
+        account_query_memory(row_bytes(&rows[0]), "result materialization")?;
+        finalize_rows(q, &mut rows);
+        return Ok((rows, scan));
+    }
+    let aggregate = q.select.iter().any(|item| is_agg(&item.expr)) || !q.group_by.is_empty();
+    if aggregate {
+        let template = states(q);
+        let mut final_groups = GroupTable::new()?;
+        let (dictionaries, scan) =
+            Table::stream_parquet_direct(path, q, options.batch_size, |batch_table| {
+                enforce_table_limit(options, &batch_table)?;
+                let groups = pool.aggregate(
+                    Arc::new(q.clone()),
+                    Arc::new(batch_table),
+                    options.batch_size,
+                )?;
+                for entry in groups.into_entries() {
+                    let target = final_groups.get_or_insert(entry.k, &template)?;
+                    merge(target, &entry.s);
+                }
+                Ok(())
+            })?;
+        let mut rows = finish_group_rows(q, &dictionaries, final_groups)?;
+        finalize_rows(q, &mut rows);
+        return Ok((rows, scan));
+    }
+    let mut batch_query = q.clone();
+    batch_query.distinct = false;
+    batch_query.order_by.clear();
+    batch_query.limit = None;
+    batch_query.offset = 0;
+    let mut bounded_query = q.clone();
+    bounded_query.limit = q.limit.map(|limit| limit.saturating_add(q.offset));
+    bounded_query.offset = 0;
+    let compact_each_batch = q.distinct || q.limit.is_some();
+    let mut rows = Vec::new();
+    let (_, scan) = Table::stream_parquet_direct(path, q, options.batch_size, |batch_table| {
+        enforce_table_limit(options, &batch_table)?;
+        rows.extend(execute(
+            &batch_query,
+            Arc::new(batch_table),
+            pool,
+            options.batch_size,
+        )?);
+        if compact_each_batch {
+            finalize_rows(&bounded_query, &mut rows);
+        }
+        Ok(())
+    })?;
+    finalize_rows(q, &mut rows);
+    Ok((rows, scan))
+}
 pub(crate) fn rows_json(rows: &[Vec<Scalar>]) -> String {
     format!(
         "[{}]",
@@ -211,10 +293,14 @@ pub(crate) fn is_relational(query: &Query) -> bool {
 }
 
 pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<(), String> {
-    if o.direct_parquet && !o.data.ends_with(".parquet") {
-        return Err("--direct-parquet requires a .parquet data file".into());
+    if o.direct_parquet && o.streaming_parquet {
+        return Err("choose either --direct-parquet or --streaming-parquet".into());
     }
-    let t = Arc::new(if o.direct_parquet {
+    let parquet_query = o.direct_parquet || o.streaming_parquet;
+    if parquet_query && !o.data.ends_with(".parquet") {
+        return Err("direct and streaming Parquet execution require a .parquet data file".into());
+    }
+    let t = Arc::new(if parquet_query {
         Table::parquet_metadata(&o.data)?
     } else {
         Table::load(&o.data)?
@@ -225,7 +311,7 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
         bind_query(&q)?;
     }
     enforce_result_limit(&o, &q, &t)?;
-    if o.direct_parquet {
+    if parquet_query {
         let scan = Table::parquet_scan_plan(&o.data, &q)?;
         q.physical.insert(
             1,
@@ -240,6 +326,16 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
                 scan.compressed_bytes_read
             ),
         );
+        if o.streaming_parquet {
+            q.physical.insert(
+                2,
+                format!(
+                    "ParquetStreamExec(batch_size={};fallback={})",
+                    o.batch_size,
+                    is_relational(&q)
+                ),
+            );
+        }
     }
     if explain {
         println!("{}", q.explain(o.batch_size));
@@ -247,21 +343,29 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
     }
     let pool = Pool::new(o.threads);
     let started = Instant::now();
-    let (execution_table, scan) = if o.direct_parquet {
+    let (execution_table, planned_scan) = if o.direct_parquet {
         let (table, scan) = Table::load_parquet_direct(&o.data, &q, o.batch_size)?;
         (Arc::new(table), scan)
     } else {
         (t.clone(), ParquetScanMetrics::default())
     };
     enforce_table_limit(&o, &execution_table)?;
-    let (rows, query_memory) = with_query_memory(o.query_memory_limit_mb, || {
-        if is_relational(&q) {
-            execute_rel(&q, &Catalog::load(&o.data, execution_table.clone())?)
+    let (result, query_memory) = with_query_memory(o.query_memory_limit_mb, || {
+        if o.streaming_parquet {
+            execute_parquet_stream(&q, &o.data, &pool, &o)
+        } else if is_relational(&q) {
+            Ok((
+                execute_rel(&q, &Catalog::load(&o.data, execution_table.clone())?)?,
+                planned_scan.clone(),
+            ))
         } else {
-            execute(&q, execution_table.clone(), &pool, o.batch_size)
+            Ok((
+                execute(&q, execution_table.clone(), &pool, o.batch_size)?,
+                planned_scan.clone(),
+            ))
         }
     });
-    let rows = rows?;
+    let (rows, scan) = result?;
     let elapsed_ns = started.elapsed().as_nanos();
     for row in &rows {
         println!(
@@ -274,10 +378,18 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
     }
     if stats {
         eprintln!(
-            "{{\"rows_scanned\":{},\"rows_returned\":{},\"batches_scanned\":{},\"columns_scanned\":{},\"worker_threads\":{},\"logical_partitions\":{},\"elapsed_ns\":{},\"query_memory_limit_bytes\":{},\"query_memory_accounted_bytes\":{},\"parquet_total_rows\":{},\"parquet_rows_read\":{},\"parquet_total_row_groups\":{},\"parquet_row_groups_read\":{},\"parquet_total_columns\":{},\"parquet_columns_read\":{},\"parquet_compressed_bytes_read\":{}}}",
-            execution_table.len(),
+            "{{\"rows_scanned\":{},\"rows_returned\":{},\"batches_scanned\":{},\"columns_scanned\":{},\"worker_threads\":{},\"logical_partitions\":{},\"elapsed_ns\":{},\"query_memory_limit_bytes\":{},\"query_memory_accounted_bytes\":{},\"parquet_total_rows\":{},\"parquet_rows_read\":{},\"parquet_total_row_groups\":{},\"parquet_row_groups_read\":{},\"parquet_total_columns\":{},\"parquet_columns_read\":{},\"parquet_compressed_bytes_read\":{},\"parquet_batches_read\":{},\"parquet_peak_decoded_batch_bytes\":{},\"parquet_streaming_fallback\":{}}}",
+            if parquet_query {
+                scan.rows_read
+            } else {
+                execution_table.len()
+            },
             rows.len(),
-            execution_table.len().div_ceil(o.batch_size),
+            if parquet_query {
+                scan.batches_read
+            } else {
+                execution_table.len().div_ceil(o.batch_size)
+            },
             q.columns.len(),
             o.threads,
             o.threads * 4,
@@ -290,7 +402,10 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
             scan.row_groups_read,
             scan.total_columns,
             scan.columns_read,
-            scan.compressed_bytes_read
+            scan.compressed_bytes_read,
+            scan.batches_read,
+            scan.peak_decoded_batch_bytes,
+            scan.streaming_fallback
         );
     }
     Ok(())

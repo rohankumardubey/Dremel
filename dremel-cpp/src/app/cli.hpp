@@ -21,6 +21,50 @@ static bool is_relational(const Query &query) {
                      }) ||
          contains_subquery(query.filter);
 }
+static void add_parquet_plan(Query &query, const std::string &path,
+                             bool streaming, std::size_t batch) {
+  const auto scan = parquet_scan_plan(path, query);
+  query.physical.insert(
+      query.physical.begin() + 1,
+      "ParquetScanExec(columns=" + std::to_string(scan.columns_read) + "/" +
+          std::to_string(scan.total_columns) + ";row_groups=" +
+          std::to_string(scan.row_groups_read) + "/" +
+          std::to_string(scan.total_row_groups) + ";rows=" +
+          std::to_string(scan.rows_read) + "/" +
+          std::to_string(scan.total_rows) + ";compressed_bytes=" +
+          std::to_string(scan.compressed_bytes_read) + ")");
+  if (streaming)
+    query.physical.insert(
+        query.physical.begin() + 2,
+        "ParquetStreamExec(batch_size=" + std::to_string(batch) +
+            ";fallback=" + (is_relational(query) ? "true" : "false") + ")");
+}
+static std::pair<Rows, ParquetScanMetrics> execute_prepared(
+    const Query &query, const std::string &path,
+    const std::shared_ptr<Table> &table, ThreadPool &pool, std::size_t threads,
+    std::size_t batch, std::size_t memory_limit_mb, bool direct_parquet,
+    bool streaming_parquet, std::shared_ptr<Catalog> &catalog) {
+  if (streaming_parquet)
+    return execute_parquet_stream(query, path, pool, threads, batch,
+                                  memory_limit_mb);
+  auto execution_table = table;
+  ParquetScanMetrics scan;
+  if (direct_parquet)
+    std::tie(execution_table, scan) = load_parquet_direct(path, query, batch);
+  if (memory_limit_mb && execution_table->approximate_bytes() >
+                             memory_limit_mb * 1024 * 1024)
+    throw std::runtime_error(
+        "RESOURCE_EXHAUSTED selected Parquet columns require approximately " +
+        std::to_string(execution_table->approximate_bytes()) + " bytes");
+  if (is_relational(query)) {
+    if (direct_parquet)
+      return {execute_rel(query, Catalog::load(path, execution_table)), scan};
+    if (!catalog)
+      catalog = std::make_shared<Catalog>(Catalog::load(path, table));
+    return {execute_rel(query, *catalog), scan};
+  }
+  return {execute(query, execution_table, pool, threads, batch), scan};
+}
 inline int run_cli(int argc, char **argv) {
   try {
     const std::string command = argc > 1 ? argv[1] : "help";
@@ -31,6 +75,14 @@ inline int run_cli(int argc, char **argv) {
         argv, argv + argc, [](const char *value) {
           return std::string(value) == "--direct-parquet";
         }) != argv + argc;
+    const bool streaming_parquet = std::find_if(
+        argv, argv + argc, [](const char *value) {
+          return std::string(value) == "--streaming-parquet";
+        }) != argv + argc;
+    if (direct_parquet && streaming_parquet)
+      throw std::runtime_error(
+          "choose either --direct-parquet or --streaming-parquet");
+    const bool parquet_query = direct_parquet || streaming_parquet;
     const auto threads = std::stoull(arg(argc, argv, "--threads", "4"));
     const auto batch = std::stoull(arg(argc, argv, "--batch-size", "4096"));
     const auto memory_limit_mb =
@@ -46,9 +98,10 @@ inline int run_cli(int argc, char **argv) {
     const auto scheduler_memory_mb =
         std::stoull(arg(argc, argv, "--scheduler-memory-mb", "1024"));
     auto load_start = Clock::now();
-    if (direct_parquet && !path.ends_with(".parquet"))
-      throw std::runtime_error("--direct-parquet requires a .parquet data file");
-    auto table = direct_parquet ? parquet_metadata_table(path) : Table::load(path);
+    if (parquet_query && !path.ends_with(".parquet"))
+      throw std::runtime_error(
+          "direct and streaming Parquet execution require a .parquet data file");
+    auto table = parquet_query ? parquet_metadata_table(path) : Table::load(path);
     if (memory_limit_mb &&
         table->approximate_bytes() > memory_limit_mb * 1024 * 1024)
       throw std::runtime_error(
@@ -66,18 +119,8 @@ inline int run_cli(int argc, char **argv) {
       if (q.ctes.empty())
         (void)bind_query(q);
       enforce_result_limit(max_result_rows, q, *table);
-      if (direct_parquet) {
-        const auto scan = parquet_scan_plan(path, q);
-        q.physical.insert(
-            q.physical.begin() + 1,
-            "ParquetScanExec(columns=" + std::to_string(scan.columns_read) +
-                "/" + std::to_string(scan.total_columns) + ";row_groups=" +
-                std::to_string(scan.row_groups_read) + "/" +
-                std::to_string(scan.total_row_groups) + ";rows=" +
-                std::to_string(scan.rows_read) + "/" +
-                std::to_string(scan.total_rows) + ";compressed_bytes=" +
-                std::to_string(scan.compressed_bytes_read) + ")");
-      }
+      if (parquet_query)
+        add_parquet_plan(q, path, streaming_parquet, batch);
       if (std::find_if(argv, argv + argc, [](const char *x) {
             return std::string(x) == "--explain";
           }) != argv + argc) {
@@ -87,20 +130,12 @@ inline int run_cli(int argc, char **argv) {
                     << *it << '\n';
       } else {
         const auto started = Clock::now();
-        auto execution_table = table;
-        ParquetScanMetrics scan;
-        if (direct_parquet)
-          std::tie(execution_table, scan) = load_parquet_direct(path, q);
-        if (memory_limit_mb && execution_table->approximate_bytes() >
-                                   memory_limit_mb * 1024 * 1024)
-          throw std::runtime_error(
-              "RESOURCE_EXHAUSTED selected Parquet columns require approximately " +
-              std::to_string(execution_table->approximate_bytes()) + " bytes");
         auto memory = std::make_shared<QueryMemory>(query_memory_limit_mb);
         QueryMemoryScope memory_scope(memory);
-        auto rows = is_relational(q)
-                        ? execute_rel(q, Catalog::load(path, execution_table))
-                        : execute(q, execution_table, pool, threads, batch);
+        std::shared_ptr<Catalog> query_catalog;
+        auto [rows, scan] = execute_prepared(
+            q, path, table, pool, threads, batch, memory_limit_mb,
+            direct_parquet, streaming_parquet, query_catalog);
         const auto elapsed_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() -
                                                                  started)
@@ -113,10 +148,12 @@ inline int run_cli(int argc, char **argv) {
         if (std::find_if(argv, argv + argc, [](const char *x) {
               return std::string(x) == "--stats";
             }) != argv + argc)
-          std::cerr << "{\"rows_scanned\":" << execution_table->size()
+          std::cerr << "{\"rows_scanned\":"
+                    << (parquet_query ? scan.rows_read : table->size())
                     << ",\"rows_returned\":" << rows.size()
                     << ",\"batches_scanned\":"
-                    << (execution_table->size() + batch - 1) / batch
+                    << (parquet_query ? scan.batches_read
+                                      : (table->size() + batch - 1) / batch)
                     << ",\"columns_scanned\":" << q.columns.size()
                     << ",\"worker_threads\":" << threads
                     << ",\"logical_partitions\":" << threads * 4
@@ -134,13 +171,18 @@ inline int run_cli(int argc, char **argv) {
                     << ",\"parquet_total_columns\":" << scan.total_columns
                     << ",\"parquet_columns_read\":" << scan.columns_read
                     << ",\"parquet_compressed_bytes_read\":"
-                    << scan.compressed_bytes_read << "}\n";
+                    << scan.compressed_bytes_read
+                    << ",\"parquet_batches_read\":" << scan.batches_read
+                    << ",\"parquet_peak_decoded_batch_bytes\":"
+                    << scan.peak_decoded_batch_bytes
+                    << ",\"parquet_streaming_fallback\":"
+                    << (scan.streaming_fallback ? "true" : "false") << "}\n";
       }
       return 0;
     }
     if (command != "bench-server") {
       std::cout << "dremel-cpp query|bench-server --data PATH --threads N "
-                   "--batch-size N [--direct-parquet] [--query-memory-limit-mb N] [--sql SQL] "
+                   "--batch-size N [--direct-parquet|--streaming-parquet] [--query-memory-limit-mb N] [--sql SQL] "
                    "[--explain]\n";
       return 0;
     }
@@ -159,19 +201,8 @@ inline int run_cli(int argc, char **argv) {
         if (query.ctes.empty())
           (void)bind_query(query);
         enforce_result_limit(max_result_rows, query, *table);
-        if (direct_parquet) {
-          const auto scan = parquet_scan_plan(path, query);
-          query.physical.insert(
-              query.physical.begin() + 1,
-              "ParquetScanExec(columns=" +
-                  std::to_string(scan.columns_read) + "/" +
-                  std::to_string(scan.total_columns) + ";row_groups=" +
-                  std::to_string(scan.row_groups_read) + "/" +
-                  std::to_string(scan.total_row_groups) + ";rows=" +
-                  std::to_string(scan.rows_read) + "/" +
-                  std::to_string(scan.total_rows) + ";compressed_bytes=" +
-                  std::to_string(scan.compressed_bytes_read) + ")");
-        }
+        if (parquet_query)
+          add_parquet_plan(query, path, streaming_parquet, batch);
         prepared.insert_or_assign(p[1], std::move(query));
         std::cout << "OK\t" << p[1];
       } else if (p[0] == "EXEC") {
@@ -180,27 +211,9 @@ inline int run_cli(int argc, char **argv) {
           auto memory = std::make_shared<QueryMemory>(query_memory_limit_mb);
           QueryMemoryScope memory_scope(memory);
           const auto &query = prepared.at(p[1]);
-          auto execution_table = table;
-          ParquetScanMetrics scan;
-          if (direct_parquet)
-            std::tie(execution_table, scan) =
-                load_parquet_direct(path, query);
-          if (memory_limit_mb && execution_table->approximate_bytes() >
-                                     memory_limit_mb * 1024 * 1024)
-            throw std::runtime_error(
-                "RESOURCE_EXHAUSTED selected Parquet columns require approximately " +
-                std::to_string(execution_table->approximate_bytes()) +
-                " bytes");
-          if (is_relational(query) && !catalog && !direct_parquet)
-            catalog = std::make_shared<Catalog>(Catalog::load(path, table));
-          Rows rows;
-          if (is_relational(query))
-            rows = direct_parquet
-                       ? execute_rel(query,
-                                     Catalog::load(path, execution_table))
-                       : execute_rel(query, *catalog);
-          else
-            rows = execute(query, execution_table, pool, threads, batch);
+          auto [rows, scan] = execute_prepared(
+              query, path, table, pool, threads, batch, memory_limit_mb,
+              direct_parquet, streaming_parquet, catalog);
           auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                         Clock::now() - start)
                         .count();
@@ -211,7 +224,9 @@ inline int run_cli(int argc, char **argv) {
                     << '\t' << scan.rows_read << '\t' << scan.total_row_groups
                     << '\t' << scan.row_groups_read << '\t'
                     << scan.total_columns << '\t' << scan.columns_read << '\t'
-                    << scan.compressed_bytes_read;
+                    << scan.compressed_bytes_read << '\t' << scan.batches_read
+                    << '\t' << scan.peak_decoded_batch_bytes << '\t'
+                    << scan.streaming_fallback;
         } catch (const std::exception &error) {
           std::cout << "ERROR\t" << error.what();
         }
@@ -223,25 +238,9 @@ inline int run_cli(int argc, char **argv) {
           auto q = prepare(Parser(p[2]).parse(), *table);
           if (q.ctes.empty())
             (void)bind_query(q);
-          auto execution_table = table;
-          ParquetScanMetrics scan;
-          if (direct_parquet)
-            std::tie(execution_table, scan) = load_parquet_direct(path, q);
-          if (memory_limit_mb && execution_table->approximate_bytes() >
-                                     memory_limit_mb * 1024 * 1024)
-            throw std::runtime_error(
-                "RESOURCE_EXHAUSTED selected Parquet columns require approximately " +
-                std::to_string(execution_table->approximate_bytes()) +
-                " bytes");
-          if (is_relational(q) && !catalog && !direct_parquet)
-            catalog = std::make_shared<Catalog>(Catalog::load(path, table));
-          Rows rows;
-          if (is_relational(q))
-            rows = direct_parquet
-                       ? execute_rel(q, Catalog::load(path, execution_table))
-                       : execute_rel(q, *catalog);
-          else
-            rows = execute(q, execution_table, pool, threads, batch);
+          auto [rows, scan] = execute_prepared(
+              q, path, table, pool, threads, batch, memory_limit_mb,
+              direct_parquet, streaming_parquet, catalog);
           auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                         Clock::now() - start)
                         .count();
@@ -252,7 +251,9 @@ inline int run_cli(int argc, char **argv) {
                     << '\t' << scan.rows_read << '\t' << scan.total_row_groups
                     << '\t' << scan.row_groups_read << '\t'
                     << scan.total_columns << '\t' << scan.columns_read << '\t'
-                    << scan.compressed_bytes_read;
+                    << scan.compressed_bytes_read << '\t' << scan.batches_read
+                    << '\t' << scan.peak_decoded_batch_bytes << '\t'
+                    << scan.streaming_fallback;
         } catch (const std::exception &error) {
           std::cout << "ERROR\t" << error.what();
         }
@@ -268,9 +269,9 @@ inline int run_cli(int argc, char **argv) {
                   << std::max<std::size_t>(1, (scheduler_memory_mb + 1) / 2);
       } else if (p[0] == "SUBMIT") {
         try {
-          if (direct_parquet)
+          if (parquet_query)
             throw std::runtime_error(
-                "direct Parquet execution is not available for async submissions");
+                "Parquet query execution is not available for async submissions");
           if (p.size() < 7)
             throw std::runtime_error("missing SUBMIT fields");
           auto found = prepared.find(p[2]);

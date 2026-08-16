@@ -1132,6 +1132,57 @@ static Rows execute_subquery(const Query &query, const Catalog &catalog,
   return execute_rel(copy, catalog);
 }
 
+static GroupTable aggregate_groups(const Query &query,
+                                   const std::shared_ptr<Table> &table,
+                                   ThreadPool &pool, std::size_t threads,
+                                   std::size_t batch) {
+  const auto parts = std::min(
+      std::max<std::size_t>(1, threads) * 4,
+      std::max<std::size_t>(1, (table->size() + std::max<std::size_t>(1, batch) - 1) /
+                                   std::max<std::size_t>(1, batch)));
+  std::vector<std::future<GroupTable>> futures;
+  const auto memory = query_memory;
+  const auto owned_query = std::make_shared<Query>(query);
+  for (std::size_t part = 0; part < parts; ++part) {
+    const auto start = part * table->size() / parts;
+    const auto end = (part + 1) * table->size() / parts;
+    futures.push_back(
+        pool.submit([owned_query, table, start, end, batch, memory] {
+          QueryMemoryScope scope(memory);
+          return partition(*owned_query, *table, start, end, batch);
+        }));
+  }
+  auto initial = states(query);
+  GroupTable final;
+  for (auto &future : futures)
+    for (auto &entry : future.get().entries())
+      merge(final.get(entry.key, initial), entry.states);
+  return final;
+}
+
+static Rows finish_group_rows(const Query &query, const Table &table,
+                              GroupTable groups) {
+  Rows rows;
+  for (auto &entry : groups.entries()) {
+    std::vector<Scalar> row;
+    std::size_t aggregate_index = 0;
+    for (auto &item : query.select) {
+      if (is_agg(item.expr))
+        row.push_back(finish(entry.states[aggregate_index++]));
+      else {
+        const auto found = std::find(query.group_by.begin(),
+                                     query.group_by.end(), item.expr->text);
+        row.push_back(table.key_scalar(
+            item.expr->text,
+            entry.key.v[std::distance(query.group_by.begin(), found)]));
+      }
+    }
+    account_query_memory(row_bytes(row), "result materialization");
+    rows.push_back(std::move(row));
+  }
+  return rows;
+}
+
 static Rows execute(const Query &q, const std::shared_ptr<Table> &t,
                     ThreadPool &pool, std::size_t threads, std::size_t batch) {
   Rows rows;
@@ -1139,38 +1190,8 @@ static Rows execute(const Query &q, const std::shared_ptr<Table> &t,
                          std::any_of(q.select.begin(), q.select.end(),
                                      [](auto &s) { return is_agg(s.expr); });
   if (aggregate) {
-    const auto parts = std::max<std::size_t>(1, threads) * 4;
-    std::vector<std::future<GroupTable>> f;
-    const auto memory = query_memory;
-    const auto query = std::make_shared<Query>(q);
-    for (std::size_t p = 0; p < parts; ++p) {
-      auto start = p * t->size() / parts, end = (p + 1) * t->size() / parts;
-      f.push_back(pool.submit([query, t, start, end, batch, memory] {
-        QueryMemoryScope scope(memory);
-        return partition(*query, *t, start, end, batch);
-      }));
-    }
-    auto init = states(q);
-    GroupTable final;
-    for (auto &future : f)
-      for (auto &e : future.get().entries())
-        merge(final.get(e.key, init), e.states);
-    for (auto &e : final.entries()) {
-      std::vector<Scalar> row;
-      std::size_t ai = 0;
-      for (auto &s : q.select) {
-        if (is_agg(s.expr))
-          row.push_back(finish(e.states[ai++]));
-        else {
-          auto it =
-              std::find(q.group_by.begin(), q.group_by.end(), s.expr->text);
-          row.push_back(t->key_scalar(
-              s.expr->text, e.key.v[std::distance(q.group_by.begin(), it)]));
-        }
-      }
-      account_query_memory(row_bytes(row), "result materialization");
-      rows.push_back(std::move(row));
-    }
+    rows = finish_group_rows(q, *t,
+                             aggregate_groups(q, t, pool, threads, batch));
   } else {
     if (filter_always_false(q.filter))
       return rows;
@@ -1238,6 +1259,88 @@ static Rows execute(const Query &q, const std::shared_ptr<Table> &t,
   }
   finalize_rows(q, rows);
   return rows;
+}
+
+static std::pair<Rows, ParquetScanMetrics>
+execute_parquet_stream(const Query &query, const std::string &path,
+                       ThreadPool &pool, std::size_t threads,
+                       std::size_t batch, std::size_t table_limit_mb) {
+  const auto enforce_batch_limit = [&](const std::shared_ptr<Table> &table) {
+    if (table_limit_mb &&
+        table->approximate_bytes() > table_limit_mb * 1024 * 1024)
+      throw std::runtime_error(
+          "RESOURCE_EXHAUSTED streaming Parquet batch requires approximately " +
+          std::to_string(table->approximate_bytes()) + " bytes");
+  };
+  const bool relational = query.from.name != "events" || !query.joins.empty() ||
+                          query.having || query.union_query ||
+                          !query.ctes.empty() ||
+                          std::any_of(query.select.begin(), query.select.end(),
+                                      [](const auto &item) {
+                                        return contains_window(item.expr) ||
+                                               contains_subquery(item.expr);
+                                      }) ||
+                          contains_subquery(query.filter);
+  if (relational) {
+    auto [table, scan] = load_parquet_direct(path, query, batch);
+    scan.streaming_fallback = true;
+    enforce_batch_limit(table);
+    return {execute_rel(query, Catalog::load(path, table)), scan};
+  }
+  const bool metadata_count =
+      query.select.size() == 1 && !query.filter && query.group_by.empty() &&
+      !query.having && query.select[0].expr->kind == ExprKind::function &&
+      query.select[0].expr->text == "count" && query.select[0].expr->left &&
+      query.select[0].expr->left->kind == ExprKind::star;
+  if (metadata_count) {
+    auto scan = parquet_scan_plan(path, query);
+    Rows rows{{static_cast<std::int64_t>(scan.rows_read)}};
+    account_query_memory(row_bytes(rows.front()), "result materialization");
+    finalize_rows(query, rows);
+    return {std::move(rows), scan};
+  }
+  const bool aggregate = !query.group_by.empty() ||
+                         std::any_of(query.select.begin(), query.select.end(),
+                                     [](const auto &item) {
+                                       return is_agg(item.expr);
+                                     });
+  if (aggregate) {
+    const auto initial = states(query);
+    GroupTable final;
+    auto [dictionaries, scan] = stream_parquet_direct(
+        path, query, batch, [&](std::shared_ptr<Table> table) {
+          enforce_batch_limit(table);
+          auto groups = aggregate_groups(query, table, pool, threads, batch);
+          for (auto &entry : groups.entries())
+            merge(final.get(entry.key, initial), entry.states);
+        });
+    auto rows = finish_group_rows(query, *dictionaries, std::move(final));
+    finalize_rows(query, rows);
+    return {std::move(rows), scan};
+  }
+  auto batch_query = query;
+  batch_query.distinct = false;
+  batch_query.order_by.clear();
+  batch_query.limit.reset();
+  batch_query.offset = 0;
+  auto bounded_query = query;
+  if (query.limit)
+    bounded_query.limit = *query.limit + query.offset;
+  bounded_query.offset = 0;
+  const bool compact_each_batch = query.distinct || query.limit.has_value();
+  Rows rows;
+  auto [dictionaries, scan] = stream_parquet_direct(
+      path, query, batch, [&](std::shared_ptr<Table> table) {
+        enforce_batch_limit(table);
+        auto batch_rows = execute(batch_query, table, pool, threads, batch);
+        rows.insert(rows.end(), std::make_move_iterator(batch_rows.begin()),
+                    std::make_move_iterator(batch_rows.end()));
+        if (compact_each_batch)
+          finalize_rows(bounded_query, rows);
+      });
+  (void)dictionaries;
+  finalize_rows(query, rows);
+  return {std::move(rows), scan};
 }
 
 } // namespace dremel
