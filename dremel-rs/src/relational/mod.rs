@@ -161,6 +161,83 @@ pub(crate) fn apply_join(
     optimizer_enabled: bool,
     filters: &[PushedFilter],
 ) -> Vec<RelRow> {
+    if optimizer_enabled
+        && matches!(join.kind, JoinKind::Inner | JoinKind::Left)
+        && let Some(on) = join.on.as_ref()
+        && let Some((left_key, right_key)) = join_equality(on, &join.table.name, bindings)
+        && let Expr::Column(left_column) = left_key
+        && let Expr::Column(right_column) = right_key
+        && let Ok((left_table, left_column)) = resolve_column(left_column, bindings)
+        && let Ok((right_table, right_column)) = resolve_column(right_column, bindings)
+        && ((right_table == "users"
+            && right_column == "user_id"
+            && (catalog.users.user_id.is_empty() || !catalog.users.index.is_empty()))
+            || (right_table == "campaigns"
+                && right_column == "campaign_id"
+                && (catalog.campaigns.campaign_id.is_empty()
+                    || !catalog.campaigns.index.is_empty())))
+    {
+        let right_filters: Vec<_> = filters
+            .iter()
+            .filter(|filter| filter.table == right_table)
+            .collect();
+        let mut output = Vec::new();
+        for left in left_rows {
+            if execution_cancelled() {
+                break;
+            }
+            let key = match relation_scalar(catalog, left, &left_table, &left_column) {
+                Scalar::Int(value) => Some(value),
+                _ => None,
+            };
+            let candidates = key.and_then(|value| {
+                if right_table == "users" {
+                    catalog.users.index.get(&value)
+                } else {
+                    catalog.campaigns.index.get(&value)
+                }
+            });
+            let mut matched = false;
+            if let Some(candidates) = candidates {
+                for &index in candidates {
+                    let right = if right_table == "users" {
+                        RelRow {
+                            user: Some(index),
+                            ..RelRow::default()
+                        }
+                    } else {
+                        RelRow {
+                            campaign: Some(index),
+                            ..RelRow::default()
+                        }
+                    };
+                    if !right_filters.iter().all(|filter| {
+                        eval_rel(&filter.expression, catalog, right, bindings).truthy()
+                    }) {
+                        continue;
+                    }
+                    let combined = merge_rel_rows(left, right);
+                    if eval_rel(on, catalog, combined, bindings).truthy() {
+                        if !account_query_memory_or_stop(
+                            std::mem::size_of::<RelRow>(),
+                            "join output",
+                        ) {
+                            return Vec::new();
+                        }
+                        output.push(combined);
+                        matched = true;
+                    }
+                }
+            }
+            if !matched && join.kind == JoinKind::Left {
+                if !account_query_memory_or_stop(std::mem::size_of::<RelRow>(), "join output") {
+                    return Vec::new();
+                }
+                output.push(left);
+            }
+        }
+        return output;
+    }
     let right_rows = base_relation_rows_filtered(&join.table.name, catalog, bindings, filters);
     if join.kind == JoinKind::Cross {
         let count = left_rows.len().saturating_mul(right_rows.len());

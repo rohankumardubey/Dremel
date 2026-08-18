@@ -1,7 +1,7 @@
 use crate::execution::aggregate::Pool;
 use crate::execution::{
     enforce_result_limit, enforce_table_limit, execute, execute_parquet_stream, is_relational,
-    rows_json, strings_json,
+    parquet_streaming_fallback, rows_json, strings_json,
 };
 use crate::optimizer::prepare;
 use crate::relational::execute_rel;
@@ -507,7 +507,7 @@ pub fn run_bench_server(o: Options) -> Result<(), String> {
                             format!(
                                 "ParquetStreamExec(batch_size={};fallback={})",
                                 o.batch_size,
-                                is_relational(&q)
+                                parquet_streaming_fallback(&q)
                             ),
                         );
                     }
@@ -577,7 +577,7 @@ pub fn run_bench_server(o: Options) -> Result<(), String> {
                             format!(
                                 "ParquetStreamExec(batch_size={};fallback={})",
                                 o.batch_size,
-                                is_relational(&q)
+                                parquet_streaming_fallback(&q)
                             ),
                         );
                     }

@@ -1261,6 +1261,208 @@ static Rows execute(const Query &q, const std::shared_ptr<Table> &t,
   return rows;
 }
 
+static bool primary_key_dimension_join(const JoinSpec &join) {
+  const std::string expected_key = join.table.name == "users"
+                                       ? "user_id"
+                                   : join.table.name == "campaigns"
+                                       ? "campaign_id"
+                                       : "";
+  if (expected_key.empty() || !join.on || join.on->kind != ExprKind::binary ||
+      join.on->text != "=" || !join.on->left || !join.on->right)
+    return false;
+  const auto is_dimension_key = [&](const ExprPtr &expr) {
+    if (expr->kind != ExprKind::column)
+      return false;
+    const auto dot = expr->text.rfind('.');
+    if (dot == std::string::npos)
+      return false;
+    const auto qualifier = expr->text.substr(0, dot);
+    const auto name = expr->text.substr(dot + 1);
+    return name == expected_key &&
+           (qualifier == join.table.alias || qualifier == join.table.name);
+  };
+  return is_dimension_key(join.on->left) || is_dimension_key(join.on->right);
+}
+
+static bool streamable_parquet_join(const Query &query) {
+  if (query.from.name != "events" || query.joins.empty() || query.having ||
+      query.union_query || !query.ctes.empty() ||
+      std::any_of(query.joins.begin(), query.joins.end(), [](const auto &join) {
+        return (join.kind != JoinKind::inner && join.kind != JoinKind::left) ||
+               !primary_key_dimension_join(join) ||
+               contains_subquery(join.on);
+      }) ||
+      std::any_of(query.select.begin(), query.select.end(),
+                  [](const auto &item) {
+                    return contains_window(item.expr) ||
+                           contains_subquery(item.expr);
+                  }) ||
+      contains_subquery(query.filter))
+    return false;
+  const bool aggregate =
+      !query.group_by.empty() ||
+      std::any_of(query.select.begin(), query.select.end(),
+                  [](const auto &item) { return is_agg(item.expr); });
+  if (!aggregate)
+    return true;
+  const bool supported_select =
+      std::all_of(query.select.begin(), query.select.end(), [](const auto &item) {
+        return item.expr->kind == ExprKind::column ||
+               (item.expr->kind == ExprKind::function &&
+                (item.expr->text == "count" || item.expr->text == "sum" ||
+                 item.expr->text == "min" || item.expr->text == "max"));
+      });
+  return supported_select &&
+         std::all_of(query.group_by.begin(), query.group_by.end(),
+                     [&](const auto &group) {
+                       return std::any_of(
+                           query.select.begin(), query.select.end(),
+                           [&](const auto &item) {
+                             return item.expr->kind == ExprKind::column &&
+                                    (item.expr->text == group ||
+                                     base_name(item.expr->text) ==
+                                         base_name(group));
+                           });
+                     });
+}
+
+static bool parquet_streaming_fallback(const Query &query) {
+  const bool relational = query.from.name != "events" || !query.joins.empty() ||
+                          query.having || query.union_query ||
+                          !query.ctes.empty() ||
+                          std::any_of(query.select.begin(), query.select.end(),
+                                      [](const auto &item) {
+                                        return contains_window(item.expr) ||
+                                               contains_subquery(item.expr);
+                                      }) ||
+                          contains_subquery(query.filter);
+  return relational && !streamable_parquet_join(query);
+}
+
+static void merge_finished_aggregate(Agg &state, const Scalar &value) {
+  if (state.kind == Agg::Kind::count) {
+    const auto *count = std::get_if<std::int64_t>(&value);
+    if (!count || *count < 0)
+      throw std::runtime_error("invalid streaming COUNT partial");
+    state.count += static_cast<std::uint64_t>(*count);
+  } else if (state.kind == Agg::Kind::sum) {
+    add_sum(state, value);
+  } else if (state.kind == Agg::Kind::min || state.kind == Agg::Kind::max) {
+    if (!std::holds_alternative<std::monostate>(value) &&
+        (!state.has ||
+         (state.kind == Agg::Kind::min ? compare(value, state.extreme) < 0
+                                       : compare(value, state.extreme) > 0))) {
+      state.extreme = value;
+      state.has = true;
+    }
+  } else {
+    throw std::runtime_error("streaming join AVG requires materialization");
+  }
+}
+
+struct StreamingRelGroup {
+  std::vector<Scalar> values;
+  std::vector<Agg> states;
+};
+
+static std::pair<Rows, ParquetScanMetrics> execute_parquet_streaming_join(
+    const Query &query, const std::string &path, std::size_t batch,
+    std::size_t table_limit_mb) {
+  const auto enforce_batch_limit = [&](const std::shared_ptr<Table> &table) {
+    if (table_limit_mb &&
+        table->approximate_bytes() > table_limit_mb * 1024 * 1024)
+      throw std::runtime_error(
+          "RESOURCE_EXHAUSTED streaming Parquet batch requires approximately " +
+          std::to_string(table->approximate_bytes()) + " bytes");
+  };
+  const bool aggregate =
+      !query.group_by.empty() ||
+      std::any_of(query.select.begin(), query.select.end(),
+                  [](const auto &item) { return is_agg(item.expr); });
+  auto batch_query = query;
+  batch_query.distinct = false;
+  batch_query.order_by.clear();
+  batch_query.limit.reset();
+  batch_query.offset = 0;
+  auto catalog = Catalog::load(path, std::make_shared<Table>());
+  if (aggregate) {
+    const auto initial = states(query);
+    std::unordered_map<std::string, StreamingRelGroup> groups;
+    if (query.group_by.empty())
+      groups.emplace("", StreamingRelGroup{{}, initial});
+    auto [dictionaries, scan] = stream_parquet_direct(
+        path, query, batch, [&](std::shared_ptr<Table> table) {
+          enforce_batch_limit(table);
+          catalog.events = std::move(table);
+          for (auto &row : execute_rel(batch_query, catalog)) {
+            std::string key;
+            std::vector<Scalar> group_values;
+            for (std::size_t index = 0; index < query.select.size(); ++index) {
+              if (is_agg(query.select[index].expr))
+                continue;
+              group_values.push_back(row[index]);
+              const auto part = scalar_hash_key(row[index]).value_or("n:");
+              key += std::to_string(part.size()) + ':' + part;
+            }
+            if (!groups.contains(key)) {
+              std::size_t bytes = sizeof(StreamingRelGroup) + key.size() +
+                                  initial.size() * sizeof(Agg) + 64;
+              for (auto &value : group_values)
+                bytes += std::holds_alternative<std::string>(value)
+                             ? std::get<std::string>(value).size()
+                             : sizeof(Scalar);
+              account_query_memory(bytes,
+                                   "streaming relational hash aggregation");
+              groups.emplace(key,
+                             StreamingRelGroup{std::move(group_values), initial});
+            }
+            auto &aggregate_states = groups.at(key).states;
+            std::size_t aggregate_index = 0;
+            for (std::size_t index = 0; index < query.select.size(); ++index)
+              if (is_agg(query.select[index].expr))
+                merge_finished_aggregate(
+                    aggregate_states[aggregate_index++], row[index]);
+          }
+        });
+    (void)dictionaries;
+    Rows rows;
+    rows.reserve(groups.size());
+    for (auto &[_, group] : groups) {
+      std::size_t group_index = 0, aggregate_index = 0;
+      std::vector<Scalar> row;
+      row.reserve(query.select.size());
+      for (auto &item : query.select)
+        row.push_back(is_agg(item.expr)
+                          ? finish(group.states[aggregate_index++])
+                          : group.values[group_index++]);
+      account_query_memory(row_bytes(row), "result materialization");
+      rows.push_back(std::move(row));
+    }
+    finalize_rows(query, rows);
+    return {std::move(rows), scan};
+  }
+
+  auto bounded_query = query;
+  if (query.limit)
+    bounded_query.limit = *query.limit + query.offset;
+  bounded_query.offset = 0;
+  const bool compact_each_batch = query.distinct || query.limit.has_value();
+  Rows rows;
+  auto [dictionaries, scan] = stream_parquet_direct(
+      path, query, batch, [&](std::shared_ptr<Table> table) {
+        enforce_batch_limit(table);
+        catalog.events = std::move(table);
+        auto batch_rows = execute_rel(batch_query, catalog);
+        rows.insert(rows.end(), std::make_move_iterator(batch_rows.begin()),
+                    std::make_move_iterator(batch_rows.end()));
+        if (compact_each_batch)
+          finalize_rows(bounded_query, rows);
+      });
+  (void)dictionaries;
+  finalize_rows(query, rows);
+  return {std::move(rows), scan};
+}
+
 static std::pair<Rows, ParquetScanMetrics>
 execute_parquet_stream(const Query &query, const std::string &path,
                        ThreadPool &pool, std::size_t threads,
@@ -1272,16 +1474,9 @@ execute_parquet_stream(const Query &query, const std::string &path,
           "RESOURCE_EXHAUSTED streaming Parquet batch requires approximately " +
           std::to_string(table->approximate_bytes()) + " bytes");
   };
-  const bool relational = query.from.name != "events" || !query.joins.empty() ||
-                          query.having || query.union_query ||
-                          !query.ctes.empty() ||
-                          std::any_of(query.select.begin(), query.select.end(),
-                                      [](const auto &item) {
-                                        return contains_window(item.expr) ||
-                                               contains_subquery(item.expr);
-                                      }) ||
-                          contains_subquery(query.filter);
-  if (relational) {
+  if (streamable_parquet_join(query))
+    return execute_parquet_streaming_join(query, path, batch, table_limit_mb);
+  if (parquet_streaming_fallback(query)) {
     auto [table, scan] = load_parquet_direct(path, query, batch);
     scan.streaming_fallback = true;
     enforce_batch_limit(table);

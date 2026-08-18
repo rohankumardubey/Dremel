@@ -670,6 +670,8 @@ static UsersTable load_users_interoperable(const std::string &path) {
   users.active.reserve(active.size());
   for (auto value : active)
     users.active.push_back(value != 0);
+  for (std::size_t row = 0; row < users.user_id.size(); ++row)
+    users.index[users.user_id[row]].push_back(row);
   return users;
 }
 

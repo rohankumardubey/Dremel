@@ -30,7 +30,7 @@ def run(engine: Path, limit_mb: int, sql: str, stats: bool = False):
     return subprocess.run(command, text=True, capture_output=True, check=False)
 
 
-def run_parquet(engine: Path, streaming: bool):
+def run_parquet(engine: Path, streaming: bool, sql: str):
     command = [
         str(engine),
         "query",
@@ -41,8 +41,7 @@ def run_parquet(engine: Path, streaming: bool):
         "--batch-size",
         "4096",
         "--sql",
-        "SELECT SUM(bytes), AVG(score), MIN(duration_ms), MAX(timestamp), "
-        "COUNT(campaign_id) FROM events WHERE event_id <= 100000",
+        sql,
     ]
     command.append("--streaming-parquet" if streaming else "--direct-parquet")
     return subprocess.run(command, text=True, capture_output=True, check=False)
@@ -127,10 +126,14 @@ for engine in ENGINES:
         join.stderr,
     )
 
-    parquet_stream = run_parquet(engine, True)
+    aggregate_sql = (
+        "SELECT SUM(bytes), AVG(score), MIN(duration_ms), MAX(timestamp), "
+        "COUNT(campaign_id) FROM events WHERE event_id <= 100000"
+    )
+    parquet_stream = run_parquet(engine, True, aggregate_sql)
     assert parquet_stream.returncode == 0, (engine, parquet_stream.stderr)
 
-    parquet_materialized = run_parquet(engine, False)
+    parquet_materialized = run_parquet(engine, False, aggregate_sql)
     assert (
         parquet_materialized.returncode != 0
         and "RESOURCE_EXHAUSTED" in parquet_materialized.stderr
@@ -138,7 +141,21 @@ for engine in ENGINES:
         engine,
         parquet_materialized.stderr,
     )
+
+    join_sql = (
+        "SELECT u.segment, COUNT(*) FROM events e JOIN users u "
+        "ON e.user_id = u.user_id WHERE e.event_id <= 100000 "
+        "GROUP BY u.segment ORDER BY u.segment"
+    )
+    parquet_join_stream = run_parquet(engine, True, join_sql)
+    assert parquet_join_stream.returncode == 0, (engine, parquet_join_stream.stderr)
+
+    parquet_join_materialized = run_parquet(engine, False, join_sql)
+    assert (
+        parquet_join_materialized.returncode != 0
+        and "RESOURCE_EXHAUSTED" in parquet_join_materialized.stderr
+    ), (engine, parquet_join_materialized.stderr)
     server_round_trip(engine)
     print(f"{engine.name}: memory-bounded execution PASS")
 
-print("Memory-bounded execution: 16 / 16 PASS")
+print("Memory-bounded execution: 20 / 20 PASS")

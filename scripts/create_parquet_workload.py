@@ -85,6 +85,34 @@ QUERIES = [
         1,
         16,
     ),
+    (
+        "P012",
+        "streaming_join_top_k",
+        "SELECT e.event_id, u.segment FROM events e JOIN users u ON e.user_id = u.user_id WHERE e.event_id <= 1000 ORDER BY e.event_id DESC LIMIT 20 OFFSET 5",
+        2,
+        1,
+    ),
+    (
+        "P013",
+        "streaming_join_aggregates",
+        "SELECT u.segment, SUM(e.bytes), MIN(e.duration_ms), MAX(e.score), COUNT(*) FROM events e JOIN users u ON e.user_id = u.user_id WHERE e.event_id <= 100000 GROUP BY u.segment ORDER BY u.segment",
+        5,
+        2,
+    ),
+    (
+        "P014",
+        "streaming_left_join",
+        "SELECT c.channel, COUNT(*) FROM events e LEFT JOIN campaigns c ON e.campaign_id = c.campaign_id WHERE e.event_id <= 100000 GROUP BY c.channel ORDER BY c.channel NULLS FIRST",
+        2,
+        2,
+    ),
+    (
+        "P015",
+        "join_avg_fallback",
+        "SELECT u.segment, AVG(e.score) FROM events e JOIN users u ON e.user_id = u.user_id WHERE e.event_id <= 100000 GROUP BY u.segment ORDER BY u.segment",
+        3,
+        2,
+    ),
 ]
 
 base = ROOT / "benchmark" / "parquet"
@@ -101,7 +129,7 @@ for query_id, category, sql, expected_columns, maximum_row_groups in QUERIES:
             "description": sql,
             "expected_columns_read": expected_columns,
             "maximum_row_groups_read": maximum_row_groups,
-            "expected_streaming_fallback": query_id in ("P008", "P009"),
+            "expected_streaming_fallback": query_id in ("P009", "P015"),
         }
     )
 (base / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

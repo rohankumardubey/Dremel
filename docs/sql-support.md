@@ -69,10 +69,15 @@ are applied across the complete result. Metadata-only `COUNT(*)` decodes no
 data batches. Query stats include batches read, peak decoded batch bytes, and
 the fallback state.
 
-Joins, windows, CTEs, subqueries, `UNION`, and `HAVING` fall back to the
-materialized direct path so they preserve the full SQL behavior. Direct and
-streaming flags are mutually exclusive. Async scheduler submissions do not yet
-use either Parquet query mode.
+Inner and left joins from `events` to `users.user_id` or
+`campaigns.campaign_id` stream fact batches through a cached primary-key index.
+Nonaggregate joins support global ordering, Top-K, offsets, and distinctness.
+Grouped join results merge `COUNT`, `SUM`, `MIN`, and `MAX` states across
+batches. Right, full, cross, and non-key joins, join queries using `AVG`,
+windows, CTEs, subqueries, `UNION`, and `HAVING` fall back to the materialized
+direct path so they preserve the full SQL behavior. Direct and streaming flags
+are mutually exclusive. Async scheduler submissions do not yet use either
+Parquet query mode.
 
 ## Concurrent execution
 
@@ -100,5 +105,5 @@ admission.
 
 DDL/DML, transactions, recursive CTEs, stored procedures, user-defined
 functions, locale-aware collations, named time zones, arbitrary-precision
-decimals, durable spill and recovery, distributed execution, and database wire
-protocols are not implemented.
+decimals, Parquet page-index pruning, durable spill and recovery, distributed
+execution, and database wire protocols are not implemented.

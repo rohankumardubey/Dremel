@@ -273,6 +273,7 @@ struct UsersTable {
   std::vector<std::string> segment, signup_date, region;
   std::vector<std::int64_t> lifetime_value;
   std::vector<bool> active;
+  std::unordered_map<std::int64_t, std::vector<std::size_t>> index;
 };
 struct CampaignsTable {
   std::vector<std::int64_t> campaign_id;
@@ -325,7 +326,9 @@ struct Catalog {
       auto value = fields(line);
       if (value.size() != 6)
         throw std::runtime_error("bad users row");
-      catalog.users.user_id.push_back(std::stoll(value[0]));
+      const auto user_id = std::stoll(value[0]);
+      catalog.users.index[user_id].push_back(catalog.users.user_id.size());
+      catalog.users.user_id.push_back(user_id);
       catalog.users.segment.push_back(std::move(value[1]));
       catalog.users.signup_date.push_back(std::move(value[2]));
       catalog.users.lifetime_value.push_back(parse_decimal_units(value[3]));

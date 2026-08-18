@@ -243,6 +243,68 @@ static std::vector<RelRow> apply_join(std::vector<RelRow> left_rows,
                                       const Bindings &bindings,
                                       bool optimizer_enabled,
                                       const std::vector<PushedFilter> &filters) {
+  const auto equality = join_equality(join.on, join.table.name, bindings);
+  if (optimizer_enabled && equality &&
+      (join.kind == JoinKind::inner || join.kind == JoinKind::left)) {
+    const auto [left_table, left_column] =
+        resolve_column(equality->first->text, bindings);
+    const auto [right_table, right_column] =
+        resolve_column(equality->second->text, bindings);
+    if ((right_table == "users" && right_column == "user_id" &&
+         (catalog.users.user_id.empty() || !catalog.users.index.empty())) ||
+        (right_table == "campaigns" && right_column == "campaign_id" &&
+         (catalog.campaigns.campaign_id.empty() ||
+          !catalog.campaigns.index.empty()))) {
+      std::vector<const PushedFilter *> right_filters;
+      for (auto &filter : filters)
+        if (filter.table == right_table)
+          right_filters.push_back(&filter);
+      std::vector<RelRow> output;
+      for (auto &left : left_rows) {
+        if (execution_cancelled())
+          break;
+        const auto value = relation_scalar(catalog, left, left_table, left_column);
+        const auto *key = std::get_if<std::int64_t>(&value);
+        const std::vector<std::size_t> *candidates = nullptr;
+        if (key) {
+          if (right_table == "users") {
+            if (const auto found = catalog.users.index.find(*key);
+                found != catalog.users.index.end())
+              candidates = &found->second;
+          } else if (const auto found = catalog.campaigns.index.find(*key);
+                     found != catalog.campaigns.index.end()) {
+            candidates = &found->second;
+          }
+        }
+        bool matched = false;
+        if (candidates)
+          for (auto index : *candidates) {
+            RelRow right;
+            if (right_table == "users")
+              right.user = index;
+            else
+              right.campaign = index;
+            if (!std::all_of(right_filters.begin(), right_filters.end(),
+                             [&](const auto *filter) {
+                               return truthy(eval_rel(filter->expression,
+                                                      catalog, right, bindings));
+                             }))
+              continue;
+            const auto combined = merge_rel_rows(left, right);
+            if (truthy(eval_rel(join.on, catalog, combined, bindings))) {
+              account_query_memory(sizeof(RelRow), "join output");
+              output.push_back(combined);
+              matched = true;
+            }
+          }
+        if (!matched && join.kind == JoinKind::left) {
+          account_query_memory(sizeof(RelRow), "join output");
+          output.push_back(left);
+        }
+      }
+      return output;
+    }
+  }
   auto right_rows = base_relation_rows_filtered(join.table.name, catalog,
                                                  bindings, filters);
   std::vector<RelRow> output;
@@ -260,7 +322,6 @@ static std::vector<RelRow> apply_join(std::vector<RelRow> left_rows,
         output.push_back(merge_rel_rows(left, right));
     return output;
   }
-  auto equality = join_equality(join.on, join.table.name, bindings);
   account_query_memory(right_rows.size(), "join match bitmap");
   std::vector<bool> matched_right(right_rows.size());
   if (optimizer_enabled && equality) {

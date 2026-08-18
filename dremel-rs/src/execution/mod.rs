@@ -2,9 +2,9 @@ pub(crate) mod aggregate;
 pub(crate) mod scalar;
 
 use crate::execution::aggregate::*;
-use crate::execution::scalar::eval;
+use crate::execution::scalar::{cmp, eval};
 use crate::optimizer::{filter_always_false, prepare};
-use crate::relational::{execute_rel, finalize_rows};
+use crate::relational::{execute_rel, finalize_rows, scalar_group_key_ref};
 use crate::sql::*;
 use crate::storage::*;
 use crate::types::*;
@@ -143,12 +143,218 @@ pub(crate) fn execute(
     Ok(rows)
 }
 
+fn primary_key_dimension_join(join: &crate::sql::JoinSpec) -> bool {
+    let expected_key = match join.table.name.as_str() {
+        "users" => "user_id",
+        "campaigns" => "campaign_id",
+        _ => return false,
+    };
+    let Some(Expr::Binary(op, left, right)) = join.on.as_ref() else {
+        return false;
+    };
+    if op != "=" {
+        return false;
+    }
+    let is_dimension_key = |expr: &Expr| {
+        let Expr::Column(column) = expr else {
+            return false;
+        };
+        let Some((qualifier, name)) = column.rsplit_once('.') else {
+            return false;
+        };
+        name == expected_key && (qualifier == join.table.alias || qualifier == join.table.name)
+    };
+    is_dimension_key(left) || is_dimension_key(right)
+}
+
+fn streamable_parquet_join(query: &Query) -> bool {
+    if query.from.name != "events"
+        || query.joins.is_empty()
+        || query.having.is_some()
+        || query.union.is_some()
+        || !query.ctes.is_empty()
+        || query.joins.iter().any(|join| {
+            !matches!(join.kind, JoinKind::Inner | JoinKind::Left)
+                || !primary_key_dimension_join(join)
+                || join.on.as_ref().is_some_and(crate::sql::contains_subquery)
+        })
+        || query
+            .select
+            .iter()
+            .any(|item| contains_window(&item.expr) || contains_subquery(&item.expr))
+        || query.filter.as_ref().is_some_and(contains_subquery)
+    {
+        return false;
+    }
+    let aggregate =
+        query.select.iter().any(|item| is_agg(&item.expr)) || !query.group_by.is_empty();
+    if !aggregate {
+        return true;
+    }
+    let supported_select = query.select.iter().all(|item| match &item.expr {
+        Expr::Column(_) => true,
+        Expr::Func(name, _) => matches!(name.as_str(), "count" | "sum" | "min" | "max"),
+        _ => false,
+    });
+    supported_select
+        && query.group_by.iter().all(|group| {
+            query.select.iter().any(|item| {
+                matches!(&item.expr, Expr::Column(column)
+                    if column == group
+                        || column.rsplit('.').next() == group.rsplit('.').next())
+            })
+        })
+}
+
+pub(crate) fn parquet_streaming_fallback(query: &Query) -> bool {
+    is_relational(query) && !streamable_parquet_join(query)
+}
+
+fn merge_finished_aggregate(state: &mut AggState, value: &Scalar) -> Result<(), String> {
+    match state {
+        AggState::Count(total) => match value {
+            Scalar::Int(count) if *count >= 0 => *total += *count as u64,
+            _ => return Err("invalid streaming COUNT partial".into()),
+        },
+        AggState::Sum(sum) => sum.add(value),
+        AggState::Min(current) => {
+            if !matches!(value, Scalar::Null)
+                && current
+                    .as_ref()
+                    .is_none_or(|old| cmp(value, old) == Some(std::cmp::Ordering::Less))
+            {
+                *current = Some(value.clone());
+            }
+        }
+        AggState::Max(current) => {
+            if !matches!(value, Scalar::Null)
+                && current
+                    .as_ref()
+                    .is_none_or(|old| cmp(value, old) == Some(std::cmp::Ordering::Greater))
+            {
+                *current = Some(value.clone());
+            }
+        }
+        AggState::Avg { .. } => return Err("streaming join AVG requires materialization".into()),
+    }
+    Ok(())
+}
+
+fn execute_parquet_streaming_join(
+    query: &Query,
+    path: &str,
+    options: &Options,
+) -> Result<(Vec<Vec<Scalar>>, ParquetScanMetrics), String> {
+    let aggregate =
+        query.select.iter().any(|item| is_agg(&item.expr)) || !query.group_by.is_empty();
+    let mut batch_query = query.clone();
+    batch_query.distinct = false;
+    batch_query.order_by.clear();
+    batch_query.limit = None;
+    batch_query.offset = 0;
+    let mut catalog = Catalog::load(path, Arc::new(Table::empty()))?;
+    if aggregate {
+        let template = states(query);
+        let mut groups =
+            std::collections::HashMap::<Vec<ScalarKey>, (Vec<Scalar>, Vec<AggState>)>::new();
+        if query.group_by.is_empty() {
+            groups.insert(Vec::new(), (Vec::new(), template.clone()));
+        }
+        let (_, scan) =
+            Table::stream_parquet_direct(path, query, options.batch_size, |batch_table| {
+                enforce_table_limit(options, &batch_table)?;
+                catalog.events = Arc::new(batch_table);
+                for row in execute_rel(&batch_query, &catalog)? {
+                    let group_values: Vec<_> = query
+                        .select
+                        .iter()
+                        .zip(&row)
+                        .filter(|(item, _)| !is_agg(&item.expr))
+                        .map(|(_, value)| value.clone())
+                        .collect();
+                    let key = group_values
+                        .iter()
+                        .map(scalar_group_key_ref)
+                        .collect::<Vec<_>>();
+                    if !groups.contains_key(&key) {
+                        account_query_memory(
+                            group_values
+                                .iter()
+                                .map(|value| match value {
+                                    Scalar::Str(text) => text.len(),
+                                    _ => std::mem::size_of::<Scalar>(),
+                                })
+                                .sum::<usize>()
+                                + template.len() * std::mem::size_of::<AggState>()
+                                + 64,
+                            "streaming relational hash aggregation",
+                        )?;
+                        groups.insert(key.clone(), (group_values, template.clone()));
+                    }
+                    let states = &mut groups.get_mut(&key).expect("group inserted").1;
+                    let mut aggregate_index = 0;
+                    for (item, value) in query.select.iter().zip(&row) {
+                        if is_agg(&item.expr) {
+                            merge_finished_aggregate(&mut states[aggregate_index], value)?;
+                            aggregate_index += 1;
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+        let mut rows = Vec::with_capacity(groups.len());
+        for (_, (group_values, aggregate_states)) in groups {
+            let mut group_index = 0;
+            let mut aggregate_index = 0;
+            let row = query
+                .select
+                .iter()
+                .map(|item| {
+                    if is_agg(&item.expr) {
+                        let value = finish(&aggregate_states[aggregate_index]);
+                        aggregate_index += 1;
+                        value
+                    } else {
+                        let value = group_values[group_index].clone();
+                        group_index += 1;
+                        value
+                    }
+                })
+                .collect::<Vec<_>>();
+            account_query_memory(row_bytes(&row), "result materialization")?;
+            rows.push(row);
+        }
+        finalize_rows(query, &mut rows);
+        return Ok((rows, scan));
+    }
+
+    let mut bounded_query = query.clone();
+    bounded_query.limit = query.limit.map(|limit| limit.saturating_add(query.offset));
+    bounded_query.offset = 0;
+    let compact_each_batch = query.distinct || query.limit.is_some();
+    let mut rows = Vec::new();
+    let (_, scan) = Table::stream_parquet_direct(path, query, options.batch_size, |batch_table| {
+        enforce_table_limit(options, &batch_table)?;
+        catalog.events = Arc::new(batch_table);
+        rows.extend(execute_rel(&batch_query, &catalog)?);
+        if compact_each_batch {
+            finalize_rows(&bounded_query, &mut rows);
+        }
+        Ok(())
+    })?;
+    finalize_rows(query, &mut rows);
+    Ok((rows, scan))
+}
+
 pub(crate) fn execute_parquet_stream(
     q: &Query,
     path: &str,
     pool: &Pool,
     options: &Options,
 ) -> Result<(Vec<Vec<Scalar>>, ParquetScanMetrics), String> {
+    if streamable_parquet_join(q) {
+        return execute_parquet_streaming_join(q, path, options);
+    }
     if is_relational(q) {
         let (table, mut scan) = Table::load_parquet_direct(path, q, options.batch_size)?;
         scan.streaming_fallback = true;
@@ -332,7 +538,7 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
                 format!(
                     "ParquetStreamExec(batch_size={};fallback={})",
                     o.batch_size,
-                    is_relational(&q)
+                    parquet_streaming_fallback(&q)
                 ),
             );
         }

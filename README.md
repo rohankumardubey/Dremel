@@ -17,7 +17,7 @@ It is an independent implementation and is not Google Dremel or BigQuery.
 | Storage | DREMCOL1, Arrow IPC, and Apache Parquet projection with row-group pruning |
 | Execution | Bounded Parquet streaming, batched scans, partitioned aggregation, joins and windows |
 | Optimizer | Scan filters, transitive predicates, pruning, contradiction elimination, selectivity-aware join ordering and Top-K |
-| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer, 11 Parquet and 5 concurrency cases |
+| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer, 15 Parquet and 5 concurrency cases |
 | Validation | Cross-engine typed results, SQLite differential tests and plan assertions |
 
 The toolchains are pinned so a later compiler update does not silently change
@@ -132,10 +132,14 @@ official Parquet min/max/null statistics cannot satisfy supported predicates:
 ```
 
 Use `--streaming-parquet` instead to pass projected Parquet record batches
-directly into scans and aggregates. `--batch-size` sets the maximum decoded
-batch size, and `--stats` reports the batch count, peak decoded batch bytes,
-and whether the query used the materialized fallback. Joins, windows, CTEs,
-subqueries, `UNION`, and `HAVING` currently use that fallback.
+directly into scans, aggregates, and eligible dimension joins. Inner and left
+joins from `events` to the `users.user_id` or `campaigns.campaign_id` primary
+key stream each fact batch through a cached dimension index. Global Top-K,
+`DISTINCT`, and grouped `COUNT`, `SUM`, `MIN`, and `MAX` are merged across
+batches. `--batch-size` sets the maximum decoded batch size, and `--stats`
+reports the batch count, peak decoded batch bytes, and whether the query used
+the materialized fallback. Other join shapes, `AVG` over joins, windows, CTEs,
+subqueries, `UNION`, and `HAVING` use that fallback.
 
 ```bash
 ./dremel-cpp/build/dremel-cpp query \
@@ -200,10 +204,11 @@ native host measurements.
 
 The default Arrow and Parquet path remains an eager full-file control. Direct
 Parquet mode materializes only projected columns and selected row groups.
-Streaming Parquet keeps simple event scans and aggregates batch bounded while
-retaining the same projection and pruning rules. Page-index pruning, streaming
-relational operators, distributed exchange, durable spill/recovery,
-transactions, and database wire protocols remain outside the current scope.
+Streaming Parquet keeps event scans, aggregates, and primary-key dimension
+joins batch bounded while retaining the same projection and pruning rules.
+Page-index pruning, streaming right/full/non-key joins, distributed exchange,
+durable spill/recovery, transactions, and database wire protocols remain
+outside the current scope.
 
 The main benchmark also runs `benchmark/memory/manifest.json` with a 256 MiB
 query workspace cap. Set `MEMORY_BOUNDED=0` to skip that suite or change the

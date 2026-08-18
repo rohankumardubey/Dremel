@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark official direct Parquet scans in the Rust and C++ engines."""
+"""Benchmark official streaming and materialized Parquet execution."""
 
 from __future__ import annotations
 

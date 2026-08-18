@@ -37,7 +37,8 @@ static void add_parquet_plan(Query &query, const std::string &path,
     query.physical.insert(
         query.physical.begin() + 2,
         "ParquetStreamExec(batch_size=" + std::to_string(batch) +
-            ";fallback=" + (is_relational(query) ? "true" : "false") + ")");
+            ";fallback=" +
+            (parquet_streaming_fallback(query) ? "true" : "false") + ")");
 }
 static std::pair<Rows, ParquetScanMetrics> execute_prepared(
     const Query &query, const std::string &path,
