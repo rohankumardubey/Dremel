@@ -22,7 +22,9 @@ CONCURRENCY="${CONCURRENCY:-1}"
 STORAGE="${STORAGE:-1}"
 MEMORY_BOUNDED="${MEMORY_BOUNDED:-1}"
 PARQUET="${PARQUET:-${PARQUET_DIRECT:-1}}"
+SPILL="${SPILL:-1}"
 QUERY_MEMORY_LIMIT_MB="${QUERY_MEMORY_LIMIT_MB:-256}"
+SPILL_MEMORY_LIMIT_MB="${SPILL_MEMORY_LIMIT_MB:-4}"
 REPORT_OPEN="${REPORT_OPEN:-auto}"
 export LTO NATIVE BENCH_CPUSET CPP_STANDARD
 
@@ -49,6 +51,7 @@ mkdir -p results
 "$PYTHON" scripts/create_sql_v1_workload.py
 "$PYTHON" scripts/create_optimizer_workload.py
 "$PYTHON" scripts/create_parquet_workload.py
+"$PYTHON" scripts/create_spill_workload.py
 "$PYTHON" scripts/create_concurrency_workload.py
 "$PYTHON" scripts/generate_data.py --rows "$DATASET_ROWS" --seed "$DATASET_SEED"
 "$PYTHON" scripts/build_column_store.py
@@ -183,6 +186,13 @@ if [[ "$MEMORY_BOUNDED" == 1 ]]; then
     --results-dir results/memory
 fi
 
+if [[ "$SPILL" == 1 ]]; then
+  "$PYTHON" scripts/run_spill_benchmark.py --data data/events.dremel \
+    --threads "$BENCH_THREADS" --batch-size "$BATCH_SIZE" \
+    --memory-limit-mb "$SPILL_MEMORY_LIMIT_MB" --warmup "$WARMUP" \
+    --iterations "$ITERATIONS" --tie-threshold "$TIE_THRESHOLD_PCT"
+fi
+
 REPORT_ARGS=(--results-dir results --include baseline)
 if [[ "$EXTENDED" == 1 ]]; then REPORT_ARGS+=(--include extended); fi
 if [[ "$SQL_V1" == 1 ]]; then REPORT_ARGS+=(--include sql); fi
@@ -191,6 +201,7 @@ if [[ "$CONCURRENCY" == 1 ]]; then REPORT_ARGS+=(--include concurrency); fi
 if [[ "$STORAGE" == 1 ]]; then REPORT_ARGS+=(--include storage); fi
 if [[ "$PARQUET" == 1 ]]; then REPORT_ARGS+=(--include parquet); fi
 if [[ "$MEMORY_BOUNDED" == 1 ]]; then REPORT_ARGS+=(--include memory); fi
+if [[ "$SPILL" == 1 ]]; then REPORT_ARGS+=(--include spill); fi
 
 if [[ "$REPORT_OPEN" == 1 || ( "$REPORT_OPEN" == auto && -t 1 ) ]]; then
   REPORT_ARGS+=(--open)

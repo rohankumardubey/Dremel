@@ -47,6 +47,15 @@ using Scalar = std::variant<std::monostate, std::int64_t, Decimal, double, bool,
                             std::string>;
 using Rows = std::vector<std::vector<Scalar>>;
 
+struct SpillMetrics {
+  std::size_t files_created{};
+  std::size_t partitions{};
+  std::uint64_t bytes_written{};
+  std::uint64_t bytes_read{};
+  std::size_t passes{};
+  bool spilled() const { return bytes_written != 0; }
+};
+
 struct ExecutionControl {
   std::atomic_bool cancelled{};
   std::optional<Clock::time_point> deadline;

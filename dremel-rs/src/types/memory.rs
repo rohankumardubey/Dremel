@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct QueryMemory {
     limit_bytes: usize,
     accounted_bytes: AtomicUsize,
+    peak_accounted_bytes: AtomicUsize,
     failed: AtomicBool,
     error: Mutex<Option<String>>,
 }
@@ -14,6 +15,7 @@ impl QueryMemory {
         Arc::new(Self {
             limit_bytes: limit_mb.saturating_mul(1024 * 1024),
             accounted_bytes: AtomicUsize::new(0),
+            peak_accounted_bytes: AtomicUsize::new(0),
             failed: AtomicBool::new(false),
             error: Mutex::new(None),
         })
@@ -42,7 +44,47 @@ impl QueryMemory {
                 .compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
             {
+                self.peak_accounted_bytes.fetch_max(next, Ordering::Relaxed);
                 return Ok(());
+            }
+        }
+    }
+
+    pub(crate) fn try_account(&self, bytes: usize) -> bool {
+        if bytes == 0 {
+            return true;
+        }
+        loop {
+            let current = self.accounted_bytes.load(Ordering::Relaxed);
+            let Some(next) = current.checked_add(bytes) else {
+                return false;
+            };
+            if self.limit_bytes > 0 && next > self.limit_bytes {
+                return false;
+            }
+            if self
+                .accounted_bytes
+                .compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                self.peak_accounted_bytes.fetch_max(next, Ordering::Relaxed);
+                return true;
+            }
+        }
+    }
+
+    pub(crate) fn release(&self, bytes: usize) {
+        let mut current = self.accounted_bytes.load(Ordering::Relaxed);
+        loop {
+            let next = current.saturating_sub(bytes);
+            match self.accounted_bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(actual) => current = actual,
             }
         }
     }
@@ -63,6 +105,10 @@ impl QueryMemory {
 
     pub(crate) fn limit_bytes(&self) -> usize {
         self.limit_bytes
+    }
+
+    pub(crate) fn peak_accounted_bytes(&self) -> usize {
+        self.peak_accounted_bytes.load(Ordering::Relaxed)
     }
 
     fn error(&self) -> Option<String> {

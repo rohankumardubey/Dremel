@@ -15,9 +15,9 @@ It is an independent implementation and is not Google Dremel or BigQuery.
 | --- | --- |
 | Engines | Rust 1.97.1 (Rust 2024) and LLVM Clang 22.1.8 (C++26) |
 | Storage | DREMCOL1, Arrow IPC, and Apache Parquet projection with row-group pruning |
-| Execution | Bounded Parquet streaming, batched scans, partitioned aggregation, joins and windows |
+| Execution | Bounded Parquet streaming, spillable aggregation, batched scans, joins and windows |
 | Optimizer | Scan filters, transitive predicates, pruning, contradiction elimination, selectivity-aware join ordering and Top-K |
-| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer, 15 Parquet and 5 concurrency cases |
+| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer, 15 Parquet, 5 spill and 5 concurrency cases |
 | Validation | Cross-engine typed results, SQLite differential tests and plan assertions |
 
 The toolchains are pinned so a later compiler update does not silently change
@@ -81,7 +81,7 @@ NATIVE=1 \
 ```
 
 `EXTENDED`, `SQL_V1`, `OPTIMIZER`, `CONCURRENCY`, `STORAGE`,
-`MEMORY_BOUNDED`, and `PARQUET` default to `1`.
+`MEMORY_BOUNDED`, `PARQUET`, and `SPILL` default to `1`.
 Set any of them to `0` to skip that suite. The storage suite verifies equal
 typed results and benchmarks full-file load plus in-memory execution for
 DREMCOL1, Arrow IPC, Parquet Snappy, and Parquet Zstd. On Linux,
@@ -162,6 +162,22 @@ the query cap disabled. `--max-result-rows` provides a separate result
 cardinality limit. See
 [SQL support](docs/sql-support.md) for the implemented language surface.
 
+Add `--spill-dir` with a nonzero query memory limit to let eligible
+high-cardinality hash aggregations partition row references to temporary files.
+The current spill path supports grouped event queries with ordered, limited
+output, including `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX`. Query stats report
+peak accounted memory, partitions, files, bytes written/read, and passes. Each
+query uses a unique child directory and removes it after success, failure, or
+cancellation.
+
+```bash
+./dremel-rs/target/release/dremel-rs query \
+  --data data/events.dremel --query-memory-limit-mb 4 \
+  --spill-dir /tmp/dremel-spill \
+  --sql "SELECT event_id, COUNT(*) AS cnt FROM events GROUP BY event_id ORDER BY event_id DESC LIMIT 100" \
+  --stats
+```
+
 ## How the comparison works
 
 Both engines load the same versioned binary column store and execute matching
@@ -206,10 +222,12 @@ The default Arrow and Parquet path remains an eager full-file control. Direct
 Parquet mode materializes only projected columns and selected row groups.
 Streaming Parquet keeps event scans, aggregates, and primary-key dimension
 joins batch bounded while retaining the same projection and pruning rules.
-Page-index pruning, streaming right/full/non-key joins, distributed exchange,
-durable spill/recovery, transactions, and database wire protocols remain
-outside the current scope.
+Page-index pruning, streaming right/full/non-key joins, external merge sort,
+distributed exchange, durable spill recovery, transactions, and database wire
+protocols remain outside the current scope.
 
 The main benchmark also runs `benchmark/memory/manifest.json` with a 256 MiB
 query workspace cap. Set `MEMORY_BOUNDED=0` to skip that suite or change the
 cap with `QUERY_MEMORY_LIMIT_MB`.
+The spill suite uses a 4 MiB cap by default. Set `SPILL=0` to skip it or change
+the cap with `SPILL_MEMORY_LIMIT_MB`.

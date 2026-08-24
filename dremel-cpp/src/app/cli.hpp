@@ -40,14 +40,23 @@ static void add_parquet_plan(Query &query, const std::string &path,
             ";fallback=" +
             (parquet_streaming_fallback(query) ? "true" : "false") + ")");
 }
-static std::pair<Rows, ParquetScanMetrics> execute_prepared(
+static void add_spill_plan(Query &query, const std::string &spill_dir,
+                           bool streaming_parquet) {
+  if (!spill_dir.empty() && !streaming_parquet && spillable_aggregate(query))
+    query.physical.insert(query.physical.begin() + 1,
+                          "SpillAggregateExec(partitions=auto)");
+}
+static std::tuple<Rows, ParquetScanMetrics, SpillMetrics> execute_prepared(
     const Query &query, const std::string &path,
     const std::shared_ptr<Table> &table, ThreadPool &pool, std::size_t threads,
     std::size_t batch, std::size_t memory_limit_mb, bool direct_parquet,
-    bool streaming_parquet, std::shared_ptr<Catalog> &catalog) {
-  if (streaming_parquet)
-    return execute_parquet_stream(query, path, pool, threads, batch,
-                                  memory_limit_mb);
+    bool streaming_parquet, const std::string &spill_dir,
+    std::shared_ptr<Catalog> &catalog) {
+  if (streaming_parquet) {
+    auto [rows, scan] = execute_parquet_stream(query, path, pool, threads,
+                                               batch, memory_limit_mb);
+    return {std::move(rows), std::move(scan), SpillMetrics{}};
+  }
   auto execution_table = table;
   ParquetScanMetrics scan;
   if (direct_parquet)
@@ -59,12 +68,15 @@ static std::pair<Rows, ParquetScanMetrics> execute_prepared(
         std::to_string(execution_table->approximate_bytes()) + " bytes");
   if (is_relational(query)) {
     if (direct_parquet)
-      return {execute_rel(query, Catalog::load(path, execution_table)), scan};
+      return {execute_rel(query, Catalog::load(path, execution_table)), scan,
+              SpillMetrics{}};
     if (!catalog)
       catalog = std::make_shared<Catalog>(Catalog::load(path, table));
-    return {execute_rel(query, *catalog), scan};
+    return {execute_rel(query, *catalog), scan, SpillMetrics{}};
   }
-  return {execute(query, execution_table, pool, threads, batch), scan};
+  auto [rows, spill] = execute_with_spill(
+      query, execution_table, pool, threads, batch, spill_dir);
+  return {std::move(rows), scan, spill};
 }
 inline int run_cli(int argc, char **argv) {
   try {
@@ -90,6 +102,7 @@ inline int run_cli(int argc, char **argv) {
         std::stoull(arg(argc, argv, "--memory-limit-mb", "0"));
     const auto query_memory_limit_mb =
         std::stoull(arg(argc, argv, "--query-memory-limit-mb", "0"));
+    const auto spill_dir = arg(argc, argv, "--spill-dir", "");
     const auto max_result_rows =
         std::stoull(arg(argc, argv, "--max-result-rows", "0"));
     const auto max_active_queries =
@@ -122,6 +135,7 @@ inline int run_cli(int argc, char **argv) {
       enforce_result_limit(max_result_rows, q, *table);
       if (parquet_query)
         add_parquet_plan(q, path, streaming_parquet, batch);
+      add_spill_plan(q, spill_dir, streaming_parquet);
       if (std::find_if(argv, argv + argc, [](const char *x) {
             return std::string(x) == "--explain";
           }) != argv + argc) {
@@ -134,9 +148,9 @@ inline int run_cli(int argc, char **argv) {
         auto memory = std::make_shared<QueryMemory>(query_memory_limit_mb);
         QueryMemoryScope memory_scope(memory);
         std::shared_ptr<Catalog> query_catalog;
-        auto [rows, scan] = execute_prepared(
+        auto [rows, scan, spill] = execute_prepared(
             q, path, table, pool, threads, batch, memory_limit_mb,
-            direct_parquet, streaming_parquet, query_catalog);
+            direct_parquet, streaming_parquet, spill_dir, query_catalog);
         const auto elapsed_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() -
                                                                  started)
@@ -163,6 +177,8 @@ inline int run_cli(int argc, char **argv) {
                     << memory->limit_bytes()
                     << ",\"query_memory_accounted_bytes\":"
                     << memory->accounted_bytes()
+                    << ",\"query_memory_peak_bytes\":"
+                    << memory->peak_accounted_bytes()
                     << ",\"parquet_total_rows\":" << scan.total_rows
                     << ",\"parquet_rows_read\":" << scan.rows_read
                     << ",\"parquet_total_row_groups\":"
@@ -177,13 +193,20 @@ inline int run_cli(int argc, char **argv) {
                     << ",\"parquet_peak_decoded_batch_bytes\":"
                     << scan.peak_decoded_batch_bytes
                     << ",\"parquet_streaming_fallback\":"
-                    << (scan.streaming_fallback ? "true" : "false") << "}\n";
+                    << (scan.streaming_fallback ? "true" : "false")
+                    << ",\"spill_files_created\":" << spill.files_created
+                    << ",\"spill_partitions\":" << spill.partitions
+                    << ",\"spill_bytes_written\":" << spill.bytes_written
+                    << ",\"spill_bytes_read\":" << spill.bytes_read
+                    << ",\"spill_passes\":" << spill.passes
+                    << ",\"spilled\":" << (spill.spilled() ? "true" : "false")
+                    << "}\n";
       }
       return 0;
     }
     if (command != "bench-server") {
       std::cout << "dremel-cpp query|bench-server --data PATH --threads N "
-                   "--batch-size N [--direct-parquet|--streaming-parquet] [--query-memory-limit-mb N] [--sql SQL] "
+                   "--batch-size N [--direct-parquet|--streaming-parquet] [--query-memory-limit-mb N] [--spill-dir PATH] [--sql SQL] "
                    "[--explain]\n";
       return 0;
     }
@@ -204,6 +227,7 @@ inline int run_cli(int argc, char **argv) {
         enforce_result_limit(max_result_rows, query, *table);
         if (parquet_query)
           add_parquet_plan(query, path, streaming_parquet, batch);
+        add_spill_plan(query, spill_dir, streaming_parquet);
         prepared.insert_or_assign(p[1], std::move(query));
         std::cout << "OK\t" << p[1];
       } else if (p[0] == "EXEC") {
@@ -212,9 +236,9 @@ inline int run_cli(int argc, char **argv) {
           auto memory = std::make_shared<QueryMemory>(query_memory_limit_mb);
           QueryMemoryScope memory_scope(memory);
           const auto &query = prepared.at(p[1]);
-          auto [rows, scan] = execute_prepared(
+          auto [rows, scan, spill] = execute_prepared(
               query, path, table, pool, threads, batch, memory_limit_mb,
-              direct_parquet, streaming_parquet, catalog);
+              direct_parquet, streaming_parquet, spill_dir, catalog);
           auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                         Clock::now() - start)
                         .count();
@@ -227,7 +251,11 @@ inline int run_cli(int argc, char **argv) {
                     << scan.total_columns << '\t' << scan.columns_read << '\t'
                     << scan.compressed_bytes_read << '\t' << scan.batches_read
                     << '\t' << scan.peak_decoded_batch_bytes << '\t'
-                    << scan.streaming_fallback;
+                    << scan.streaming_fallback << '\t'
+                    << memory->peak_accounted_bytes() << '\t'
+                    << spill.files_created << '\t' << spill.partitions << '\t'
+                    << spill.bytes_written << '\t' << spill.bytes_read << '\t'
+                    << spill.passes << '\t' << spill.spilled();
         } catch (const std::exception &error) {
           std::cout << "ERROR\t" << error.what();
         }
@@ -239,9 +267,12 @@ inline int run_cli(int argc, char **argv) {
           auto q = prepare(Parser(p[2]).parse(), *table);
           if (q.ctes.empty())
             (void)bind_query(q);
-          auto [rows, scan] = execute_prepared(
+          if (parquet_query)
+            add_parquet_plan(q, path, streaming_parquet, batch);
+          add_spill_plan(q, spill_dir, streaming_parquet);
+          auto [rows, scan, spill] = execute_prepared(
               q, path, table, pool, threads, batch, memory_limit_mb,
-              direct_parquet, streaming_parquet, catalog);
+              direct_parquet, streaming_parquet, spill_dir, catalog);
           auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                         Clock::now() - start)
                         .count();
@@ -254,7 +285,11 @@ inline int run_cli(int argc, char **argv) {
                     << scan.total_columns << '\t' << scan.columns_read << '\t'
                     << scan.compressed_bytes_read << '\t' << scan.batches_read
                     << '\t' << scan.peak_decoded_batch_bytes << '\t'
-                    << scan.streaming_fallback;
+                    << scan.streaming_fallback << '\t'
+                    << memory->peak_accounted_bytes() << '\t'
+                    << spill.files_created << '\t' << spill.partitions << '\t'
+                    << spill.bytes_written << '\t' << spill.bytes_read << '\t'
+                    << spill.passes << '\t' << spill.spilled();
         } catch (const std::exception &error) {
           std::cout << "ERROR\t" << error.what();
         }

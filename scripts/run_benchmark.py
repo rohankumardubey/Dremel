@@ -54,7 +54,19 @@ class Server:
         self, name: str, command: list[str], env: dict[str, str] | None = None
     ):
         self.name = name
-        self.last_query_memory = {"limit_bytes": 0, "accounted_bytes": 0}
+        self.last_query_memory = {
+            "limit_bytes": 0,
+            "accounted_bytes": 0,
+            "peak_bytes": 0,
+        }
+        self.last_spill_metrics = {
+            "files_created": 0,
+            "partitions": 0,
+            "bytes_written": 0,
+            "bytes_read": 0,
+            "passes": 0,
+            "spilled": False,
+        }
         self.last_scan_metrics = {
             "total_rows": 0,
             "rows_read": 0,
@@ -113,6 +125,7 @@ class Server:
             self.last_query_memory = {
                 "limit_bytes": int(p[4]),
                 "accounted_bytes": int(p[5]),
+                "peak_bytes": int(p[16]) if len(p) >= 17 else int(p[5]),
             }
         if len(p) >= 13:
             self.last_scan_metrics = dict(
@@ -137,6 +150,15 @@ class Server:
                     "streaming_fallback": p[15].lower() in ("1", "true"),
                 }
             )
+        if len(p) >= 23:
+            self.last_spill_metrics = {
+                "files_created": int(p[17]),
+                "partitions": int(p[18]),
+                "bytes_written": int(p[19]),
+                "bytes_read": int(p[20]),
+                "passes": int(p[21]),
+                "spilled": p[22].lower() in ("1", "true"),
+            }
         return int(p[1]), json.loads(p[3])
 
     def e2e(self, qid: str, sql: str) -> int:

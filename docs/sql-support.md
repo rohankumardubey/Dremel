@@ -94,16 +94,35 @@ outcomes, queue and execution latency percentiles, and Jain's fairness index.
 threads. Both engines account scan selections, hash aggregation
 tables, join build tables and outputs, distinct sets, window state,
 intermediate relations, top-k buffers, and result materialization. Accounting
-is monotonic for the lifetime of a query, so it can reject a query even when an
-earlier operator's allocation is no longer live. The value is an operator
-accounting metric, not process RSS. Budget exhaustion returns
+is monotonic for ordinary operators. Spill operators use owned reservations
+that are released after each partition, while peak usage remains recorded. The
+value is an operator accounting metric, not process RSS. Budget exhaustion returns
 `RESOURCE_EXHAUSTED` without returning a partial result. The cap does not
 include the read-only loaded table; use `--memory-limit-mb` for table
 admission.
+
+`--spill-dir` enables automatic disk partitioning for eligible event-table hash
+aggregations when their estimated group state exceeds half of the available
+query budget. Spill execution currently requires `GROUP BY`, `ORDER BY`, and
+`LIMIT`, with at most three group keys, on a single `events` table query without
+`HAVING`, CTEs, unions, windows, or subqueries. It supports the same `COUNT`,
+`SUM`, `AVG`, `MIN`, and `MAX` states as in-memory aggregation. The input is
+hash partitioned by group key, each partition is aggregated within a fixed
+share of the hard query cap, and a bounded global Top-K is retained across
+partitions.
+
+Spill files contain internal row references and are not a persistent storage
+format. Each query creates a uniquely named workspace below the configured
+directory. The workspace is removed on normal completion, memory failure,
+execution error, or cancellation. Query stats expose current and peak accounted
+memory, partition and file counts, bytes written/read, passes, and whether the
+operator spilled. Queries outside this shape retain the existing
+`RESOURCE_EXHAUSTED` behavior.
 
 ## Out of scope
 
 DDL/DML, transactions, recursive CTEs, stored procedures, user-defined
 functions, locale-aware collations, named time zones, arbitrary-precision
-decimals, Parquet page-index pruning, durable spill and recovery, distributed
-execution, and database wire protocols are not implemented.
+decimals, Parquet page-index pruning, external merge sort, durable spill
+recovery, distributed execution, and database wire protocols are not
+implemented.

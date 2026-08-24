@@ -1,7 +1,7 @@
 use crate::execution::aggregate::Pool;
 use crate::execution::{
-    enforce_result_limit, enforce_table_limit, execute, execute_parquet_stream, is_relational,
-    parquet_streaming_fallback, rows_json, strings_json,
+    enforce_result_limit, enforce_table_limit, execute_parquet_stream, execute_with_spill,
+    is_relational, parquet_streaming_fallback, rows_json, spillable_aggregate, strings_json,
 };
 use crate::optimizer::prepare;
 use crate::relational::execute_rel;
@@ -418,9 +418,10 @@ fn execute_prepared(
     table: &Arc<Table>,
     pool: &Pool,
     catalog: &mut Option<Arc<Catalog>>,
-) -> Result<(Vec<Vec<Scalar>>, ParquetScanMetrics), String> {
+) -> Result<(Vec<Vec<Scalar>>, ParquetScanMetrics, SpillMetrics), String> {
     if o.streaming_parquet {
-        return execute_parquet_stream(query, &o.data, pool, o);
+        return execute_parquet_stream(query, &o.data, pool, o)
+            .map(|(rows, scan)| (rows, scan, SpillMetrics::default()));
     }
     let (execution_table, scan) = if o.direct_parquet {
         let (table, scan) = Table::load_parquet_direct(&o.data, query, o.batch_size)?;
@@ -429,19 +430,26 @@ fn execute_prepared(
         (table.clone(), ParquetScanMetrics::default())
     };
     enforce_table_limit(o, &execution_table)?;
-    let rows = if is_relational(query) {
-        if o.direct_parquet {
+    let (rows, spill) = if is_relational(query) {
+        let rows = if o.direct_parquet {
             execute_rel(query, &Catalog::load(&o.data, execution_table)?)?
         } else {
             if catalog.is_none() {
                 *catalog = Some(Arc::new(Catalog::load(&o.data, table.clone())?));
             }
             execute_rel(query, catalog.as_ref().expect("catalog loaded"))?
-        }
+        };
+        (rows, SpillMetrics::default())
     } else {
-        execute(query, execution_table, pool, o.batch_size)?
+        execute_with_spill(
+            query,
+            execution_table,
+            pool,
+            o.batch_size,
+            o.spill_dir.as_deref(),
+        )?
     };
-    Ok((rows, scan))
+    Ok((rows, scan, spill))
 }
 
 pub fn run_bench_server(o: Options) -> Result<(), String> {
@@ -512,6 +520,10 @@ pub fn run_bench_server(o: Options) -> Result<(), String> {
                         );
                     }
                 }
+                if o.spill_dir.is_some() && !o.streaming_parquet && spillable_aggregate(&q) {
+                    q.physical
+                        .insert(1, "SpillAggregateExec(partitions=auto)".into());
+                }
                 prepared.insert(p[1].into(), q);
                 println!("OK\t{}", p[1])
             }
@@ -523,8 +535,8 @@ pub fn run_bench_server(o: Options) -> Result<(), String> {
                 });
                 let ns = now.elapsed().as_nanos();
                 match rows {
-                    Ok((rows, scan)) => println!(
-                        "RESULT\t{ns}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    Ok((rows, scan, spill)) => println!(
+                        "RESULT\t{ns}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                         rows.len(),
                         if p.get(2) == Some(&"1") {
                             rows_json(&rows)
@@ -542,7 +554,14 @@ pub fn run_bench_server(o: Options) -> Result<(), String> {
                         scan.compressed_bytes_read,
                         scan.batches_read,
                         scan.peak_decoded_batch_bytes,
-                        scan.streaming_fallback
+                        scan.streaming_fallback,
+                        memory.peak_accounted_bytes(),
+                        spill.files_created,
+                        spill.partitions,
+                        spill.bytes_written,
+                        spill.bytes_read,
+                        spill.passes,
+                        spill.spilled()
                     ),
                     Err(error) => println!("ERROR\t{}", error.replace(['\t', '\n'], " ")),
                 }
@@ -582,13 +601,17 @@ pub fn run_bench_server(o: Options) -> Result<(), String> {
                         );
                     }
                 }
+                if o.spill_dir.is_some() && !o.streaming_parquet && spillable_aggregate(&q) {
+                    q.physical
+                        .insert(1, "SpillAggregateExec(partitions=auto)".into());
+                }
                 let (rows, memory) = with_query_memory(o.query_memory_limit_mb, || {
                     execute_prepared(&o, &q, &table, &pool, &mut catalog)
                 });
                 let ns = now.elapsed().as_nanos();
                 match rows {
-                    Ok((rows, scan)) => println!(
-                        "RESULT\t{ns}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    Ok((rows, scan, spill)) => println!(
+                        "RESULT\t{ns}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                         rows.len(),
                         if p.get(3) == Some(&"1") {
                             rows_json(&rows)
@@ -606,7 +629,14 @@ pub fn run_bench_server(o: Options) -> Result<(), String> {
                         scan.compressed_bytes_read,
                         scan.batches_read,
                         scan.peak_decoded_batch_bytes,
-                        scan.streaming_fallback
+                        scan.streaming_fallback,
+                        memory.peak_accounted_bytes(),
+                        spill.files_created,
+                        spill.partitions,
+                        spill.bytes_written,
+                        spill.bytes_read,
+                        spill.passes,
+                        spill.spilled()
                     ),
                     Err(error) => println!("ERROR\t{}", error.replace(['\t', '\n'], " ")),
                 }

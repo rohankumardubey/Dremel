@@ -191,7 +191,7 @@ pub(crate) fn finish(s: &AggState) -> Scalar {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct GroupKey {
     pub(crate) v: [u64; 3],
     pub(crate) n: u8,
