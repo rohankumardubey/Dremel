@@ -3,6 +3,7 @@
 
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +15,13 @@ DATA = ROOT / "data/events.dremel"
 PARQUET_DATA = ROOT / "data/events-snappy.parquet"
 
 
-def run(engine: Path, limit_mb: int, sql: str, stats: bool = False):
+def run(
+    engine: Path,
+    limit_mb: int,
+    sql: str,
+    stats: bool = False,
+    spill_dir: Path | None = None,
+):
     command = [
         str(engine),
         "query",
@@ -25,6 +32,8 @@ def run(engine: Path, limit_mb: int, sql: str, stats: bool = False):
         "--sql",
         sql,
     ]
+    if spill_dir is not None:
+        command.extend(("--spill-dir", str(spill_dir)))
     if stats:
         command.append("--stats")
     return subprocess.run(command, text=True, capture_output=True, check=False)
@@ -155,7 +164,41 @@ for engine in ENGINES:
         parquet_join_materialized.returncode != 0
         and "RESOURCE_EXHAUSTED" in parquet_join_materialized.stderr
     ), (engine, parquet_join_materialized.stderr)
+
+    spill_sql = (
+        "SELECT event_id, COUNT(*) AS cnt FROM events GROUP BY event_id "
+        "ORDER BY event_id DESC LIMIT 10"
+    )
+    with tempfile.TemporaryDirectory(prefix="dremel-spill-test-") as directory:
+        spill_root = Path(directory)
+        spilled = run(engine, 4, spill_sql, stats=True, spill_dir=spill_root)
+        assert spilled.returncode == 0 and len(spilled.stdout.splitlines()) == 10, (
+            engine,
+            spilled.stderr,
+        )
+        spill_stats = json.loads(spilled.stderr.splitlines()[-1])
+        assert (
+            spill_stats["spilled"] and spill_stats["spill_files_created"] > 0
+        ), spill_stats
+        assert spill_stats["spill_bytes_written"] == spill_stats["spill_bytes_read"], (
+            engine,
+            spill_stats,
+        )
+        assert spill_stats["query_memory_peak_bytes"] <= 4 * 1024 * 1024, spill_stats
+        assert not any(spill_root.iterdir()), (engine, list(spill_root.iterdir()))
+
+        oversized_result = run(
+            engine,
+            4,
+            "SELECT event_id, COUNT(*) FROM events GROUP BY event_id "
+            "ORDER BY event_id LIMIT 100000",
+            spill_dir=spill_root,
+        )
+        assert oversized_result.returncode != 0 and "RESOURCE_EXHAUSTED" in (
+            oversized_result.stderr
+        ), (engine, oversized_result.stderr)
+        assert not any(spill_root.iterdir()), (engine, list(spill_root.iterdir()))
     server_round_trip(engine)
     print(f"{engine.name}: memory-bounded execution PASS")
 
-print("Memory-bounded execution: 20 / 20 PASS")
+print("Memory-bounded execution: 28 / 28 PASS")

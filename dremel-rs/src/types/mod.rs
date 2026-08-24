@@ -16,10 +16,26 @@ pub struct Options {
     pub batch_size: usize,
     pub memory_limit_mb: usize,
     pub query_memory_limit_mb: usize,
+    pub spill_dir: Option<String>,
     pub max_result_rows: usize,
     pub max_active_queries: usize,
     pub admission_queue_capacity: usize,
     pub scheduler_memory_mb: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SpillMetrics {
+    pub(crate) files_created: usize,
+    pub(crate) partitions: usize,
+    pub(crate) bytes_written: u64,
+    pub(crate) bytes_read: u64,
+    pub(crate) passes: usize,
+}
+
+impl SpillMetrics {
+    pub(crate) fn spilled(&self) -> bool {
+        self.bytes_written > 0
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

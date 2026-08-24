@@ -1,6 +1,7 @@
 #pragma once
 
 #include "aggregate.hpp"
+#include <cstring>
 
 namespace dremel {
 
@@ -445,6 +446,12 @@ static void finalize_rows(const Query &query, Rows &rows) {
   if (query.limit && rows.size() > *query.limit)
     rows.resize(*query.limit);
 }
+
+} // namespace dremel
+
+#include "spill.hpp"
+
+namespace dremel {
 struct MaterializedRelation {
   std::string name;
   std::vector<std::string> columns;
@@ -1259,6 +1266,15 @@ static Rows execute(const Query &q, const std::shared_ptr<Table> &t,
   }
   finalize_rows(q, rows);
   return rows;
+}
+
+static std::pair<Rows, SpillMetrics>
+execute_with_spill(const Query &query, const std::shared_ptr<Table> &table,
+                   ThreadPool &pool, std::size_t threads, std::size_t batch,
+                   const std::string &spill_dir) {
+  if (should_spill_aggregate(query, *table, spill_dir))
+    return execute_spilled_aggregate(query, *table, batch, spill_dir);
+  return {execute(query, table, pool, threads, batch), SpillMetrics{}};
 }
 
 static bool primary_key_dimension_join(const JoinSpec &join) {

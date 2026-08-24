@@ -42,6 +42,16 @@ fn group_table_resizes() {
     assert_eq!(t.len, 1000);
 }
 #[test]
+fn query_memory_reservations_release_and_retain_peak() {
+    let memory = QueryMemory::new(1);
+    assert!(memory.try_account(256 * 1024));
+    assert_eq!(memory.accounted_bytes(), 256 * 1024);
+    memory.release(128 * 1024);
+    assert_eq!(memory.accounted_bytes(), 128 * 1024);
+    assert_eq!(memory.peak_accounted_bytes(), 256 * 1024);
+    assert!(!memory.try_account(1024 * 1024));
+}
+#[test]
 fn dictionary_and_nullable() {
     let mut d = Dictionary::default();
     assert_eq!(d.insert("IN"), 0);

@@ -54,6 +54,13 @@ static int self_test(const std::string &dir) {
     g.get(k, init);
   }
   assert(g.size() == 1000);
+  auto query_memory_test = std::make_shared<QueryMemory>(1);
+  assert(query_memory_test->try_account(256 * 1024));
+  assert(query_memory_test->accounted_bytes() == 256 * 1024);
+  query_memory_test->release(128 * 1024);
+  assert(query_memory_test->accounted_bytes() == 128 * 1024);
+  assert(query_memory_test->peak_accounted_bytes() == 256 * 1024);
+  assert(!query_memory_test->try_account(1024 * 1024));
   Document d{3, {{"u", {{"en", {}}, {"fr", "FR"}}}, {{}, {{"de", "DE"}}}}};
   assert(assemble(shred(d)) == d);
   auto table = std::make_shared<Table>();

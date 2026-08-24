@@ -1,0 +1,32 @@
+[
+  {
+    "query_id": "SP001",
+    "category": "high_cardinality_count",
+    "file": "queries/SP001.sql",
+    "description": "SELECT event_id, COUNT(*) AS cnt FROM events GROUP BY event_id ORDER BY event_id DESC LIMIT 100"
+  },
+  {
+    "query_id": "SP002",
+    "category": "multi_aggregate",
+    "file": "queries/SP002.sql",
+    "description": "SELECT user_id, SUM(bytes) AS total_bytes, AVG(score) AS avg_score, MIN(duration_ms) AS min_duration, MAX(duration_ms) AS max_duration, COUNT(campaign_id) AS campaigns FROM events GROUP BY user_id ORDER BY total_bytes DESC, user_id ASC LIMIT 100"
+  },
+  {
+    "query_id": "SP003",
+    "category": "filtered_high_cardinality",
+    "file": "queries/SP003.sql",
+    "description": "SELECT timestamp, COUNT(*) AS events, SUM(bytes) AS total_bytes FROM events WHERE success = true GROUP BY timestamp ORDER BY events DESC, timestamp DESC LIMIT 100 OFFSET 10"
+  },
+  {
+    "query_id": "SP004",
+    "category": "multi_key_aggregate",
+    "file": "queries/SP004.sql",
+    "description": "SELECT user_id, country, COUNT(*) AS events, SUM(bytes) AS total_bytes FROM events GROUP BY user_id, country ORDER BY total_bytes DESC, user_id ASC, country ASC LIMIT 100"
+  },
+  {
+    "query_id": "SP005",
+    "category": "nullable_group_key",
+    "file": "queries/SP005.sql",
+    "description": "SELECT campaign_id, COUNT(*) AS events, AVG(score) AS avg_score FROM events GROUP BY campaign_id ORDER BY events DESC, campaign_id ASC NULLS FIRST LIMIT 50"
+  }
+]

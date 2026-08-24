@@ -1,0 +1,1 @@
+SELECT user_id, SUM(bytes) AS total_bytes, AVG(score) AS avg_score, MIN(duration_ms) AS min_duration, MAX(duration_ms) AS max_duration, COUNT(campaign_id) AS campaigns FROM events GROUP BY user_id ORDER BY total_bytes DESC, user_id ASC LIMIT 100
