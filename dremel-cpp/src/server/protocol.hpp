@@ -13,16 +13,51 @@ static std::string scalar_json(const Scalar &v) {
     o << "{\"t\":\"i\",\"v\":" << *x << '}';
   else if (auto *x = std::get_if<Decimal>(&v))
     o << "{\"t\":\"d\",\"v\":\"" << decimal_text(x->units) << "\"}";
-  else if (auto *x = std::get_if<double>(&v))
-    o << "{\"t\":\"f\",\"v\":" << *x << '}';
+  else if (auto *x = std::get_if<double>(&v)) {
+    if (!std::isfinite(*x))
+      return "{\"t\":\"f\",\"v\":\"" + std::to_string(*x) + "\"}";
+    std::ostringstream scientific;
+    scientific << std::scientific << std::setprecision(16) << *x;
+    auto value = scientific.str();
+    const auto exponent = value.find('e');
+    value = value.substr(0, exponent + 1) +
+            std::to_string(std::stoi(value.substr(exponent + 1)));
+    return "{\"t\":\"f\",\"v\":" + value + '}';
+  }
   else if (auto *x = std::get_if<bool>(&v))
     o << "{\"t\":\"b\",\"v\":" << (*x ? "true" : "false") << '}';
   else {
     o << "{\"t\":\"s\",\"v\":\"";
-    for (char c : std::get<std::string>(v)) {
-      if (c == '"' || c == '\\')
-        o << '\\';
-      o << c;
+    for (const unsigned char c : std::get<std::string>(v)) {
+      switch (c) {
+      case '"':
+        o << "\\\"";
+        break;
+      case '\\':
+        o << "\\\\";
+        break;
+      case '\b':
+        o << "\\b";
+        break;
+      case '\f':
+        o << "\\f";
+        break;
+      case '\n':
+        o << "\\n";
+        break;
+      case '\r':
+        o << "\\r";
+        break;
+      case '\t':
+        o << "\\t";
+        break;
+      default:
+        if (c < 0x20)
+          o << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+            << static_cast<int>(c) << std::dec;
+        else
+          o << static_cast<char>(c);
+      }
     }
     o << "\"}";
   }
@@ -42,6 +77,15 @@ static std::string rows_json(const Rows &r) {
     s += ']';
   }
   return s + "]";
+}
+static std::string row_json(const std::vector<Scalar> &row) {
+  std::string output = "[";
+  for (std::size_t index = 0; index < row.size(); ++index) {
+    if (index)
+      output += ',';
+    output += scalar_json(row[index]);
+  }
+  return output + ']';
 }
 static std::string strings_json(const std::vector<std::string> &values) {
   std::string output = "[";

@@ -6,6 +6,10 @@
 namespace dremel {
 
 static int self_test(const std::string &dir) {
+  assert(scalar_json(Scalar{0.0005}) ==
+         "{\"t\":\"f\",\"v\":5.0000000000000001e-4}");
+  assert(scalar_json(Scalar{std::string{"line\n\t\"\\"}}) ==
+         "{\"t\":\"s\",\"v\":\"line\\n\\t\\\"\\\\\"}");
   auto q = Parser("SELECT event_id, duration_ms*2 AS x FROM events WHERE "
                   "campaign_id IS NOT NULL LIMIT 3")
                .parse();

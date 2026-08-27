@@ -23,8 +23,10 @@ STORAGE="${STORAGE:-1}"
 MEMORY_BOUNDED="${MEMORY_BOUNDED:-1}"
 PARQUET="${PARQUET:-${PARQUET_DIRECT:-1}}"
 SPILL="${SPILL:-1}"
+RESULT_STREAMING="${RESULT_STREAMING:-1}"
 QUERY_MEMORY_LIMIT_MB="${QUERY_MEMORY_LIMIT_MB:-256}"
 SPILL_MEMORY_LIMIT_MB="${SPILL_MEMORY_LIMIT_MB:-4}"
+RESULT_STREAM_MEMORY_LIMIT_MB="${RESULT_STREAM_MEMORY_LIMIT_MB:-1}"
 REPORT_OPEN="${REPORT_OPEN:-auto}"
 export LTO NATIVE BENCH_CPUSET CPP_STANDARD
 
@@ -50,8 +52,9 @@ mkdir -p results
 "$PYTHON" scripts/create_extended_workload.py
 "$PYTHON" scripts/create_sql_v1_workload.py
 "$PYTHON" scripts/create_optimizer_workload.py
-"$PYTHON" scripts/create_parquet_workload.py
+"$PYTHON" scripts/create_parquet_workload.py --rows "$DATASET_ROWS"
 "$PYTHON" scripts/create_spill_workload.py
+"$PYTHON" scripts/create_streaming_workload.py --rows "$DATASET_ROWS"
 "$PYTHON" scripts/create_concurrency_workload.py
 "$PYTHON" scripts/generate_data.py --rows "$DATASET_ROWS" --seed "$DATASET_SEED"
 "$PYTHON" scripts/build_column_store.py
@@ -125,6 +128,7 @@ ctest --test-dir dremel-cpp/build --output-on-failure
 "$PYTHON" scripts/differential_test.py
 "$PYTHON" scripts/test_resource_limits.py
 "$PYTHON" scripts/test_memory_limits.py
+"$PYTHON" scripts/test_streaming_results.py
 
 "$PYTHON" scripts/run_benchmark.py --data data/events.dremel --threads "$BENCH_THREADS" --batch-size "$BATCH_SIZE" \
   --warmup "$WARMUP" --iterations "$ITERATIONS" --tie-threshold "$TIE_THRESHOLD_PCT"
@@ -193,6 +197,13 @@ if [[ "$SPILL" == 1 ]]; then
     --iterations "$ITERATIONS" --tie-threshold "$TIE_THRESHOLD_PCT"
 fi
 
+if [[ "$RESULT_STREAMING" == 1 ]]; then
+  "$PYTHON" scripts/run_streaming_benchmark.py --data data/events.dremel \
+    --batch-size "$BATCH_SIZE" --memory-limit-mb "$RESULT_STREAM_MEMORY_LIMIT_MB" \
+    --warmup "$WARMUP" --iterations "$ITERATIONS" \
+    --tie-threshold "$TIE_THRESHOLD_PCT"
+fi
+
 REPORT_ARGS=(--results-dir results --include baseline)
 if [[ "$EXTENDED" == 1 ]]; then REPORT_ARGS+=(--include extended); fi
 if [[ "$SQL_V1" == 1 ]]; then REPORT_ARGS+=(--include sql); fi
@@ -202,6 +213,7 @@ if [[ "$STORAGE" == 1 ]]; then REPORT_ARGS+=(--include storage); fi
 if [[ "$PARQUET" == 1 ]]; then REPORT_ARGS+=(--include parquet); fi
 if [[ "$MEMORY_BOUNDED" == 1 ]]; then REPORT_ARGS+=(--include memory); fi
 if [[ "$SPILL" == 1 ]]; then REPORT_ARGS+=(--include spill); fi
+if [[ "$RESULT_STREAMING" == 1 ]]; then REPORT_ARGS+=(--include streaming); fi
 
 if [[ "$REPORT_OPEN" == 1 || ( "$REPORT_OPEN" == auto && -t 1 ) ]]; then
   REPORT_ARGS+=(--open)

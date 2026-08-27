@@ -1,8 +1,10 @@
 pub(crate) mod aggregate;
 pub(crate) mod scalar;
 mod spill;
+mod stream;
 
 pub(crate) use spill::spillable_aggregate;
+pub(crate) use stream::{stream_parquet_results, stream_table_results, streamable_result};
 
 use crate::execution::aggregate::*;
 use crate::execution::scalar::{cmp, eval};
@@ -11,6 +13,7 @@ use crate::relational::{execute_rel, finalize_rows, scalar_group_key_ref};
 use crate::sql::*;
 use crate::storage::*;
 use crate::types::*;
+use std::io::{BufWriter, Write};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -451,12 +454,15 @@ pub(crate) fn rows_json(rows: &[Vec<Scalar>]) -> String {
     format!(
         "[{}]",
         rows.iter()
-            .map(|r| format!(
-                "[{}]",
-                r.iter().map(Scalar::json).collect::<Vec<_>>().join(",")
-            ))
+            .map(|row| row_json(row))
             .collect::<Vec<_>>()
             .join(",")
+    )
+}
+pub(crate) fn row_json(row: &[Scalar]) -> String {
+    format!(
+        "[{}]",
+        row.iter().map(Scalar::json).collect::<Vec<_>>().join(",")
     )
 }
 pub(crate) fn strings_json(values: &[String]) -> String {
@@ -521,6 +527,49 @@ pub(crate) fn is_relational(query: &Query) -> bool {
         || !query.ctes.is_empty()
 }
 
+#[allow(clippy::too_many_arguments)]
+fn print_query_stats(
+    options: &Options,
+    query: &Query,
+    rows_scanned: usize,
+    rows_returned: usize,
+    batches_scanned: usize,
+    elapsed_ns: u128,
+    query_memory: &QueryMemory,
+    scan: &ParquetScanMetrics,
+    spill: &SpillMetrics,
+    result_streamed: bool,
+    stream: &ResultStreamMetrics,
+) {
+    eprintln!(
+        "{{\"rows_scanned\":{rows_scanned},\"rows_returned\":{rows_returned},\"batches_scanned\":{batches_scanned},\"columns_scanned\":{},\"worker_threads\":{},\"logical_partitions\":{},\"elapsed_ns\":{elapsed_ns},\"query_memory_limit_bytes\":{},\"query_memory_accounted_bytes\":{},\"query_memory_peak_bytes\":{},\"parquet_total_rows\":{},\"parquet_rows_read\":{},\"parquet_total_row_groups\":{},\"parquet_row_groups_read\":{},\"parquet_total_columns\":{},\"parquet_columns_read\":{},\"parquet_compressed_bytes_read\":{},\"parquet_batches_read\":{},\"parquet_peak_decoded_batch_bytes\":{},\"parquet_streaming_fallback\":{},\"spill_files_created\":{},\"spill_partitions\":{},\"spill_bytes_written\":{},\"spill_bytes_read\":{},\"spill_passes\":{},\"spilled\":{},\"result_streamed\":{result_streamed},\"result_output_bytes\":{},\"result_batches\":{}}}",
+        query.columns.len(),
+        options.threads,
+        options.threads * 4,
+        query_memory.limit_bytes(),
+        query_memory.accounted_bytes(),
+        query_memory.peak_accounted_bytes(),
+        scan.total_rows,
+        scan.rows_read,
+        scan.total_row_groups,
+        scan.row_groups_read,
+        scan.total_columns,
+        scan.columns_read,
+        scan.compressed_bytes_read,
+        scan.batches_read,
+        scan.peak_decoded_batch_bytes,
+        scan.streaming_fallback,
+        spill.files_created,
+        spill.partitions,
+        spill.bytes_written,
+        spill.bytes_read,
+        spill.passes,
+        spill.spilled(),
+        stream.output_bytes,
+        stream.batches_scanned
+    );
+}
+
 pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<(), String> {
     if o.direct_parquet && o.streaming_parquet {
         return Err("choose either --direct-parquet or --streaming-parquet".into());
@@ -570,12 +619,91 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
         q.physical
             .insert(1, "SpillAggregateExec(partitions=auto)".into());
     }
+    if o.stream_results {
+        if !streamable_result(&q) {
+            return Err("STREAMING_UNSUPPORTED result streaming requires a single events scan with projection/filter and no DISTINCT, aggregation, ORDER BY, joins, windows, CTEs, unions, or subqueries".into());
+        }
+        q.physical.insert(
+            if parquet_query { 2 } else { 1 },
+            format!("ResultStreamExec(batch_size={})", o.batch_size),
+        );
+    }
     if explain {
         println!("{}", q.explain(o.batch_size));
         return Ok(());
     }
     let pool = Pool::new(o.threads);
     let started = Instant::now();
+    if o.stream_results {
+        let stdout = std::io::stdout();
+        let mut writer = BufWriter::with_capacity(8192, stdout.lock());
+        let (result, query_memory) = with_query_memory(o.query_memory_limit_mb, || {
+            account_query_memory(8192, "streaming output buffer")?;
+            let execution = {
+                let mut write_row = |row: &[Scalar]| -> Result<usize, String> {
+                    let mut line = row_json(row);
+                    line.push('\n');
+                    let bytes = line.len();
+                    account_query_memory(bytes, "streaming output encoding")?;
+                    let result = writer
+                        .write_all(line.as_bytes())
+                        .map_err(|error| format!("cannot write streaming result: {error}"));
+                    if let Some(memory) = current_query_memory() {
+                        memory.release(bytes);
+                    }
+                    result.map(|()| bytes)
+                };
+                if o.streaming_parquet {
+                    stream_parquet_results(
+                        &q,
+                        &o.data,
+                        o.batch_size,
+                        o.memory_limit_mb,
+                        &mut write_row,
+                    )
+                } else if o.direct_parquet {
+                    let (table, scan) = Table::load_parquet_direct(&o.data, &q, o.batch_size)?;
+                    enforce_table_limit(&o, &table)?;
+                    stream_table_results(&q, &table, o.batch_size, &mut write_row)
+                        .map(|metrics| (metrics, scan))
+                } else {
+                    stream_table_results(&q, &t, o.batch_size, &mut write_row)
+                        .map(|metrics| (metrics, ParquetScanMetrics::default()))
+                }
+            };
+            let flush = writer
+                .flush()
+                .map_err(|error| format!("cannot flush streaming result: {error}"));
+            if let Some(memory) = current_query_memory() {
+                memory.release(8192);
+            }
+            let output = execution?;
+            flush?;
+            Ok(output)
+        });
+        let (stream, scan) = result?;
+        if stats {
+            let parquet = o.direct_parquet || o.streaming_parquet;
+            print_query_stats(
+                &o,
+                &q,
+                if parquet { scan.rows_read } else { t.len() },
+                stream.rows_returned,
+                if parquet {
+                    scan.batches_read
+                } else {
+                    stream.batches_scanned
+                },
+                started.elapsed().as_nanos(),
+                &query_memory,
+                &scan,
+                &SpillMetrics::default(),
+                true,
+                &stream,
+            );
+        }
+        return Ok(());
+    }
     let (execution_table, planned_scan) = if o.direct_parquet {
         let (table, scan) = Table::load_parquet_direct(&o.data, &q, o.batch_size)?;
         (Arc::new(table), scan)
@@ -607,17 +735,12 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
     let (rows, scan, spill) = result?;
     let elapsed_ns = started.elapsed().as_nanos();
     for row in &rows {
-        println!(
-            "{}",
-            row.iter()
-                .map(|v| format!("{v:?}"))
-                .collect::<Vec<_>>()
-                .join("\t")
-        )
+        println!("{}", row_json(row))
     }
     if stats {
-        eprintln!(
-            "{{\"rows_scanned\":{},\"rows_returned\":{},\"batches_scanned\":{},\"columns_scanned\":{},\"worker_threads\":{},\"logical_partitions\":{},\"elapsed_ns\":{},\"query_memory_limit_bytes\":{},\"query_memory_accounted_bytes\":{},\"query_memory_peak_bytes\":{},\"parquet_total_rows\":{},\"parquet_rows_read\":{},\"parquet_total_row_groups\":{},\"parquet_row_groups_read\":{},\"parquet_total_columns\":{},\"parquet_columns_read\":{},\"parquet_compressed_bytes_read\":{},\"parquet_batches_read\":{},\"parquet_peak_decoded_batch_bytes\":{},\"parquet_streaming_fallback\":{},\"spill_files_created\":{},\"spill_partitions\":{},\"spill_bytes_written\":{},\"spill_bytes_read\":{},\"spill_passes\":{},\"spilled\":{}}}",
+        print_query_stats(
+            &o,
+            &q,
             if parquet_query {
                 scan.rows_read
             } else {
@@ -629,29 +752,12 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
             } else {
                 execution_table.len().div_ceil(o.batch_size)
             },
-            q.columns.len(),
-            o.threads,
-            o.threads * 4,
             elapsed_ns,
-            query_memory.limit_bytes(),
-            query_memory.accounted_bytes(),
-            query_memory.peak_accounted_bytes(),
-            scan.total_rows,
-            scan.rows_read,
-            scan.total_row_groups,
-            scan.row_groups_read,
-            scan.total_columns,
-            scan.columns_read,
-            scan.compressed_bytes_read,
-            scan.batches_read,
-            scan.peak_decoded_batch_bytes,
-            scan.streaming_fallback,
-            spill.files_created,
-            spill.partitions,
-            spill.bytes_written,
-            spill.bytes_read,
-            spill.passes,
-            spill.spilled()
+            &query_memory,
+            &scan,
+            &spill,
+            false,
+            &ResultStreamMetrics::default(),
         );
     }
     Ok(())

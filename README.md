@@ -15,9 +15,9 @@ It is an independent implementation and is not Google Dremel or BigQuery.
 | --- | --- |
 | Engines | Rust 1.97.1 (Rust 2024) and LLVM Clang 22.1.8 (C++26) |
 | Storage | DREMCOL1, Arrow IPC, and Apache Parquet projection with row-group pruning |
-| Execution | Bounded Parquet streaming, spillable aggregation, batched scans, joins and windows |
+| Execution | Bounded Parquet and result streaming, spillable aggregation, batched scans, joins and windows |
 | Optimizer | Scan filters, transitive predicates, pruning, contradiction elimination, selectivity-aware join ordering and Top-K |
-| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer, 15 Parquet, 5 spill and 5 concurrency cases |
+| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer, 15 Parquet, 5 spill, 5 result streaming and 5 concurrency cases |
 | Validation | Cross-engine typed results, SQLite differential tests and plan assertions |
 
 The toolchains are pinned so a later compiler update does not silently change
@@ -81,7 +81,7 @@ NATIVE=1 \
 ```
 
 `EXTENDED`, `SQL_V1`, `OPTIMIZER`, `CONCURRENCY`, `STORAGE`,
-`MEMORY_BOUNDED`, `PARQUET`, and `SPILL` default to `1`.
+`MEMORY_BOUNDED`, `PARQUET`, `SPILL`, and `RESULT_STREAMING` default to `1`.
 Set any of them to `0` to skip that suite. The storage suite verifies equal
 typed results and benchmarks full-file load plus in-memory execution for
 DREMCOL1, Arrow IPC, Parquet Snappy, and Parquet Zstd. On Linux,
@@ -178,6 +178,24 @@ cancellation.
   --stats
 ```
 
+Add `--stream-results` to emit typed NDJSON as rows are produced instead of
+holding the complete result in memory. The bounded path supports a single
+`events` scan with scalar projection, filtering, `LIMIT`, and `OFFSET`. It can
+also consume official Arrow-backed Parquet record batches with
+`--streaming-parquet`. Query stats report emitted rows, bytes, batches, and
+peak accounted memory.
+
+```bash
+./dremel-cpp/build/dremel-cpp query \
+  --data data/events.dremel --query-memory-limit-mb 1 --stream-results \
+  --sql "SELECT event_id, country, score FROM events WHERE event_id <= 100000" \
+  --stats > result.ndjson
+```
+
+Each output line is one JSON array containing typed scalar objects. Streaming
+can expose earlier rows before a later execution or output error, so consumers
+must treat a successful process exit as the completion signal.
+
 ## How the comparison works
 
 Both engines load the same versioned binary column store and execute matching
@@ -212,6 +230,7 @@ ctest --test-dir dremel-cpp/build --output-on-failure
 python3 scripts/differential_test.py
 python3 scripts/test_resource_limits.py
 python3 scripts/test_memory_limits.py
+python3 scripts/test_streaming_results.py
 ```
 
 CI runs the same checks on macOS with the pinned toolchains. The `Dockerfile`
@@ -230,4 +249,6 @@ The main benchmark also runs `benchmark/memory/manifest.json` with a 256 MiB
 query workspace cap. Set `MEMORY_BOUNDED=0` to skip that suite or change the
 cap with `QUERY_MEMORY_LIMIT_MB`.
 The spill suite uses a 4 MiB cap by default. Set `SPILL=0` to skip it or change
-the cap with `SPILL_MEMORY_LIMIT_MB`.
+the cap with `SPILL_MEMORY_LIMIT_MB`. The result-streaming suite uses a 1 MiB
+cap. Set `RESULT_STREAMING=0` to skip it or change the cap with
+`RESULT_STREAM_MEMORY_LIMIT_MB`.

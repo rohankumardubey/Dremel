@@ -3,10 +3,26 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+parser = argparse.ArgumentParser()
+parser.add_argument("--rows", type=int, default=1_000_000)
+args = parser.parse_args()
+if args.rows < 1_000:
+    parser.error("--rows must be at least 1000")
+
+prefix_end = min(100_000, args.rows)
+short_prefix_end = min(1_000, args.rows)
+window_end = min(500, args.rows)
+selective_start = max(1, args.rows // 5)
+selective_end = max(selective_start, args.rows * 26 // 100)
+late_start = max(1, args.rows * 90 // 100)
+late_end = max(late_start + 1, args.rows * 92 // 100)
+top_k_start = max(1, args.rows // 5)
+top_k_end = min(args.rows, top_k_start + max(1_000, args.rows // 1_000))
 QUERIES = [
     (
         "P001",
@@ -18,14 +34,14 @@ QUERIES = [
     (
         "P002",
         "leading_row_groups",
-        "SELECT COUNT(*) FROM events WHERE event_id <= 100000",
+        f"SELECT COUNT(*) FROM events WHERE event_id <= {prefix_end}",
         1,
         2,
     ),
     (
         "P003",
         "projected_selective_aggregate",
-        "SELECT SUM(bytes) FROM events WHERE event_id BETWEEN 200000 AND 260000",
+        f"SELECT SUM(bytes) FROM events WHERE event_id BETWEEN {selective_start} AND {selective_end}",
         2,
         2,
     ),
@@ -39,7 +55,7 @@ QUERIES = [
     (
         "P005",
         "late_row_groups",
-        "SELECT AVG(score) FROM events WHERE event_id >= 900000 AND event_id < 920000",
+        f"SELECT AVG(score) FROM events WHERE event_id >= {late_start} AND event_id < {late_end}",
         2,
         2,
     ),
@@ -53,28 +69,28 @@ QUERIES = [
     (
         "P007",
         "wide_projection",
-        "SELECT SUM(bytes), AVG(score), MIN(duration_ms), MAX(timestamp), COUNT(campaign_id) FROM events WHERE event_id <= 100000",
+        f"SELECT SUM(bytes), AVG(score), MIN(duration_ms), MAX(timestamp), COUNT(campaign_id) FROM events WHERE event_id <= {prefix_end}",
         6,
         2,
     ),
     (
         "P008",
         "dimension_join",
-        "SELECT u.segment, COUNT(*) FROM events e JOIN users u ON e.user_id = u.user_id WHERE e.event_id <= 100000 GROUP BY u.segment ORDER BY u.segment",
+        f"SELECT u.segment, COUNT(*) FROM events e JOIN users u ON e.user_id = u.user_id WHERE e.event_id <= {prefix_end} GROUP BY u.segment ORDER BY u.segment",
         2,
         2,
     ),
     (
         "P009",
         "window_scan",
-        "SELECT event_id, ROW_NUMBER() OVER (PARTITION BY country ORDER BY score DESC, event_id ASC) FROM events WHERE event_id <= 500 ORDER BY event_id",
+        f"SELECT event_id, ROW_NUMBER() OVER (PARTITION BY country ORDER BY score DESC, event_id ASC) FROM events WHERE event_id <= {window_end} ORDER BY event_id",
         3,
         1,
     ),
     (
         "P010",
         "streaming_top_k",
-        "SELECT event_id, country, score FROM events WHERE event_id BETWEEN 200000 AND 201000 ORDER BY score DESC, event_id ASC LIMIT 25 OFFSET 5",
+        f"SELECT event_id, country, score FROM events WHERE event_id BETWEEN {top_k_start} AND {top_k_end} ORDER BY score DESC, event_id ASC LIMIT 25 OFFSET 5",
         3,
         1,
     ),
@@ -88,28 +104,28 @@ QUERIES = [
     (
         "P012",
         "streaming_join_top_k",
-        "SELECT e.event_id, u.segment FROM events e JOIN users u ON e.user_id = u.user_id WHERE e.event_id <= 1000 ORDER BY e.event_id DESC LIMIT 20 OFFSET 5",
+        f"SELECT e.event_id, u.segment FROM events e JOIN users u ON e.user_id = u.user_id WHERE e.event_id <= {short_prefix_end} ORDER BY e.event_id DESC LIMIT 20 OFFSET 5",
         2,
         1,
     ),
     (
         "P013",
         "streaming_join_aggregates",
-        "SELECT u.segment, SUM(e.bytes), MIN(e.duration_ms), MAX(e.score), COUNT(*) FROM events e JOIN users u ON e.user_id = u.user_id WHERE e.event_id <= 100000 GROUP BY u.segment ORDER BY u.segment",
+        f"SELECT u.segment, SUM(e.bytes), MIN(e.duration_ms), MAX(e.score), COUNT(*) FROM events e JOIN users u ON e.user_id = u.user_id WHERE e.event_id <= {prefix_end} GROUP BY u.segment ORDER BY u.segment",
         5,
         2,
     ),
     (
         "P014",
         "streaming_left_join",
-        "SELECT c.channel, COUNT(*) FROM events e LEFT JOIN campaigns c ON e.campaign_id = c.campaign_id WHERE e.event_id <= 100000 GROUP BY c.channel ORDER BY c.channel NULLS FIRST",
+        f"SELECT c.channel, COUNT(*) FROM events e LEFT JOIN campaigns c ON e.campaign_id = c.campaign_id WHERE e.event_id <= {prefix_end} GROUP BY c.channel ORDER BY c.channel NULLS FIRST",
         2,
         2,
     ),
     (
         "P015",
         "join_avg_fallback",
-        "SELECT u.segment, AVG(e.score) FROM events e JOIN users u ON e.user_id = u.user_id WHERE e.event_id <= 100000 GROUP BY u.segment ORDER BY u.segment",
+        f"SELECT u.segment, AVG(e.score) FROM events e JOIN users u ON e.user_id = u.user_id WHERE e.event_id <= {prefix_end} GROUP BY u.segment ORDER BY u.segment",
         3,
         2,
     ),
