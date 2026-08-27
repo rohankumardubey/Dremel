@@ -193,8 +193,9 @@ for engine in ENGINES:
 
         oversized_result = run(
             engine,
-            4,
-            "SELECT event_id, COUNT(*) FROM events GROUP BY event_id "
+            2,
+            "SELECT event_id, MIN(user_id), MIN(timestamp), MIN(bytes), "
+            "MIN(duration_ms), MIN(score) FROM events GROUP BY event_id "
             "ORDER BY event_id LIMIT 100000",
             spill_dir=spill_root,
         )
