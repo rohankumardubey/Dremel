@@ -52,9 +52,9 @@ mkdir -p results
 "$PYTHON" scripts/create_extended_workload.py
 "$PYTHON" scripts/create_sql_v1_workload.py
 "$PYTHON" scripts/create_optimizer_workload.py
-"$PYTHON" scripts/create_parquet_workload.py
+"$PYTHON" scripts/create_parquet_workload.py --rows "$DATASET_ROWS"
 "$PYTHON" scripts/create_spill_workload.py
-"$PYTHON" scripts/create_streaming_workload.py
+"$PYTHON" scripts/create_streaming_workload.py --rows "$DATASET_ROWS"
 "$PYTHON" scripts/create_concurrency_workload.py
 "$PYTHON" scripts/generate_data.py --rows "$DATASET_ROWS" --seed "$DATASET_SEED"
 "$PYTHON" scripts/build_column_store.py
