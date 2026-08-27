@@ -137,7 +137,9 @@ for engine in ENGINES:
 
     aggregate_sql = (
         "SELECT SUM(bytes), AVG(score), MIN(duration_ms), MAX(timestamp), "
-        "COUNT(campaign_id) FROM events WHERE event_id <= 100000"
+        "COUNT(campaign_id), MIN(event_id), MAX(user_id), COUNT(country), "
+        "COUNT(device), COUNT(event_type), COUNT(success) FROM events "
+        "WHERE event_id <= 100000"
     )
     parquet_stream = run_parquet(engine, True, aggregate_sql)
     assert parquet_stream.returncode == 0, (engine, parquet_stream.stderr)
@@ -152,9 +154,11 @@ for engine in ENGINES:
     )
 
     join_sql = (
-        "SELECT u.segment, COUNT(*) FROM events e JOIN users u "
-        "ON e.user_id = u.user_id WHERE e.event_id <= 100000 "
-        "GROUP BY u.segment ORDER BY u.segment"
+        "SELECT u.segment, SUM(e.bytes), MIN(e.score), MIN(e.duration_ms), "
+        "MAX(e.timestamp), COUNT(e.campaign_id), COUNT(e.country), "
+        "COUNT(e.device), COUNT(e.event_type), COUNT(e.success) "
+        "FROM events e JOIN users u ON e.user_id = u.user_id "
+        "WHERE e.event_id <= 100000 GROUP BY u.segment ORDER BY u.segment"
     )
     parquet_join_stream = run_parquet(engine, True, join_sql)
     assert parquet_join_stream.returncode == 0, (engine, parquet_join_stream.stderr)
