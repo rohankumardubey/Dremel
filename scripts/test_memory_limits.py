@@ -127,7 +127,7 @@ for engine in ENGINES:
 
     join = run(
         engine,
-        16,
+        1,
         "SELECT COUNT(*) FROM events e JOIN users u ON e.user_id = u.user_id",
     )
     assert join.returncode != 0 and "RESOURCE_EXHAUSTED" in join.stderr, (

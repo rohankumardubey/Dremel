@@ -450,6 +450,7 @@ static void finalize_rows(const Query &query, Rows &rows) {
 } // namespace dremel
 
 #include "spill.hpp"
+#include "stream.hpp"
 
 namespace dremel {
 struct MaterializedRelation {

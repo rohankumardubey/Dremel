@@ -47,6 +47,12 @@ using Scalar = std::variant<std::monostate, std::int64_t, Decimal, double, bool,
                             std::string>;
 using Rows = std::vector<std::vector<Scalar>>;
 
+struct ResultStreamMetrics {
+  std::size_t rows_returned{};
+  std::size_t batches_scanned{};
+  std::uint64_t output_bytes{};
+};
+
 struct SpillMetrics {
   std::size_t files_created{};
   std::size_t partitions{};

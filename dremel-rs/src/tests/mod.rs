@@ -11,6 +11,17 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 #[test]
+fn typed_json_is_canonical_and_escaped() {
+    assert_eq!(
+        Scalar::Float(0.0005).json(),
+        "{\"t\":\"f\",\"v\":5.0000000000000001e-4}"
+    );
+    assert_eq!(
+        Scalar::Str("line\n\t\"\\".into()).json(),
+        "{\"t\":\"s\",\"v\":\"line\\n\\t\\\"\\\\\"}"
+    );
+}
+#[test]
 fn lexer_and_parser() {
     let q=Parser::new("SELECT event_id, duration_ms*2 AS x FROM events WHERE NOT success = false AND campaign_id IS NOT NULL LIMIT 3;").unwrap().parse().unwrap();
     assert_eq!(q.select.len(), 2);

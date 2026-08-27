@@ -1,0 +1,32 @@
+[
+  {
+    "query_id": "ST001",
+    "category": "narrow_projection",
+    "file": "queries/ST001.sql",
+    "description": "Stream 100,000 integer identifiers"
+  },
+  {
+    "query_id": "ST002",
+    "category": "wide_projection",
+    "file": "queries/ST002.sql",
+    "description": "Stream 50,000 rows containing numeric, dictionary, nullable, and string values"
+  },
+  {
+    "query_id": "ST003",
+    "category": "selective_filter",
+    "file": "queries/ST003.sql",
+    "description": "Stream successful purchase events through a selective filter"
+  },
+  {
+    "query_id": "ST004",
+    "category": "nullable_projection",
+    "file": "queries/ST004.sql",
+    "description": "Stream 100,000 rows with nullable campaign identifiers"
+  },
+  {
+    "query_id": "ST005",
+    "category": "scalar_expression",
+    "file": "queries/ST005.sql",
+    "description": "Stream computed scalar expressions without result materialization"
+  }
+]

@@ -94,12 +94,26 @@ outcomes, queue and execution latency percentiles, and Jain's fairness index.
 threads. Both engines account scan selections, hash aggregation
 tables, join build tables and outputs, distinct sets, window state,
 intermediate relations, top-k buffers, and result materialization. Accounting
-is monotonic for ordinary operators. Spill operators use owned reservations
-that are released after each partition, while peak usage remains recorded. The
-value is an operator accounting metric, not process RSS. Budget exhaustion returns
-`RESOURCE_EXHAUSTED` without returning a partial result. The cap does not
-include the read-only loaded table; use `--memory-limit-mb` for table
+is monotonic for ordinary materializing operators. Spill and result-streaming
+operators use owned reservations that are released after each partition,
+batch, or row, while peak usage remains recorded. The value is an operator
+accounting metric, not process RSS. Materialized-query budget exhaustion
+returns `RESOURCE_EXHAUSTED` without returning a partial result. The cap does
+not include the read-only loaded table; use `--memory-limit-mb` for table
 admission.
+
+`--stream-results` writes one typed-NDJSON array per row without materializing
+the complete result. It supports scalar projection and filtering over a single
+`events` scan, plus `LIMIT` and `OFFSET`. `DISTINCT`, aggregation, `ORDER BY`,
+joins, windows, CTEs, unions, and subqueries are rejected with
+`STREAMING_UNSUPPORTED`. The same sink accepts official Arrow-backed record
+batches when combined with `--streaming-parquet`.
+
+The streaming path accounts the scan-selection batch, current result row, and
+output encoder buffer. Stats expose emitted rows, output bytes, result batches,
+and current and peak query memory. An output or execution failure can happen
+after earlier rows have been written, so a consumer must require a successful
+process exit before accepting the stream as complete.
 
 `--spill-dir` enables automatic disk partitioning for eligible event-table hash
 aggregations when their estimated group state exceeds half of the available

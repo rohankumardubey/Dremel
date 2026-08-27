@@ -46,6 +46,13 @@ static void add_spill_plan(Query &query, const std::string &spill_dir,
     query.physical.insert(query.physical.begin() + 1,
                           "SpillAggregateExec(partitions=auto)");
 }
+static void add_result_stream_plan(Query &query, bool enabled,
+                                   bool parquet_query, std::size_t batch) {
+  if (enabled)
+    query.physical.insert(query.physical.begin() + (parquet_query ? 2 : 1),
+                          "ResultStreamExec(batch_size=" +
+                              std::to_string(batch) + ")");
+}
 static std::tuple<Rows, ParquetScanMetrics, SpillMetrics> execute_prepared(
     const Query &query, const std::string &path,
     const std::shared_ptr<Table> &table, ThreadPool &pool, std::size_t threads,
@@ -92,6 +99,10 @@ inline int run_cli(int argc, char **argv) {
         argv, argv + argc, [](const char *value) {
           return std::string(value) == "--streaming-parquet";
         }) != argv + argc;
+    const bool stream_results = std::find_if(
+        argv, argv + argc, [](const char *value) {
+          return std::string(value) == "--stream-results";
+        }) != argv + argc;
     if (direct_parquet && streaming_parquet)
       throw std::runtime_error(
           "choose either --direct-parquet or --streaming-parquet");
@@ -136,11 +147,19 @@ inline int run_cli(int argc, char **argv) {
       if (parquet_query)
         add_parquet_plan(q, path, streaming_parquet, batch);
       add_spill_plan(q, spill_dir, streaming_parquet);
+      if (stream_results && !streamable_result(q))
+        throw std::runtime_error(
+            "STREAMING_UNSUPPORTED result streaming requires a single events "
+            "scan with projection/filter and no DISTINCT, aggregation, ORDER "
+            "BY, joins, windows, CTEs, unions, or subqueries");
+      add_result_stream_plan(q, stream_results, parquet_query, batch);
       if (std::find_if(argv, argv + argc, [](const char *x) {
             return std::string(x) == "--explain";
           }) != argv + argc) {
-        for (auto it = q.physical.rbegin(); it != q.physical.rend(); ++it)
-          std::cout << std::string(std::distance(q.physical.rbegin(), it) * 2,
+        auto physical = q.physical;
+        physical.front() += " batch_size=" + std::to_string(batch);
+        for (auto it = physical.rbegin(); it != physical.rend(); ++it)
+          std::cout << std::string(std::distance(physical.rbegin(), it) * 2,
                                    ' ')
                     << *it << '\n';
       } else {
@@ -148,27 +167,66 @@ inline int run_cli(int argc, char **argv) {
         auto memory = std::make_shared<QueryMemory>(query_memory_limit_mb);
         QueryMemoryScope memory_scope(memory);
         std::shared_ptr<Catalog> query_catalog;
-        auto [rows, scan, spill] = execute_prepared(
-            q, path, table, pool, threads, batch, memory_limit_mb,
-            direct_parquet, streaming_parquet, spill_dir, query_catalog);
+        Rows rows;
+        ParquetScanMetrics scan;
+        SpillMetrics spill;
+        ResultStreamMetrics stream;
+        auto execution_table = table;
+        if (stream_results) {
+          StreamMemoryReservation output_buffer(8192,
+                                                "streaming output buffer");
+          auto sink = [&](const std::vector<Scalar> &row) {
+            auto line = row_json(row) + '\n';
+            StreamMemoryReservation output_memory(
+                line.size(), "streaming output encoding");
+            std::cout.write(line.data(), static_cast<std::streamsize>(line.size()));
+            if (!std::cout)
+              throw std::runtime_error("cannot write streaming result");
+            return line.size();
+          };
+          if (streaming_parquet) {
+            std::tie(stream, scan) = stream_parquet_results(
+                q, path, batch, memory_limit_mb, sink);
+          } else {
+            if (direct_parquet)
+              std::tie(execution_table, scan) =
+                  load_parquet_direct(path, q, batch);
+            if (memory_limit_mb &&
+                execution_table->approximate_bytes() >
+                    memory_limit_mb * 1024 * 1024)
+              throw std::runtime_error(
+                  "RESOURCE_EXHAUSTED selected columns require approximately " +
+                  std::to_string(execution_table->approximate_bytes()) +
+                  " bytes");
+            stream = stream_table_results(q, *execution_table, batch, sink);
+          }
+          std::cout.flush();
+          if (!std::cout)
+            throw std::runtime_error("cannot flush streaming result");
+        } else {
+          std::tie(rows, scan, spill) = execute_prepared(
+              q, path, table, pool, threads, batch, memory_limit_mb,
+              direct_parquet, streaming_parquet, spill_dir, query_catalog);
+        }
         const auto elapsed_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() -
                                                                  started)
                 .count();
-        for (auto &r : rows) {
-          for (auto &v : r)
-            std::cout << scalar_json(v) << '\t';
-          std::cout << '\n';
-        }
+        if (!stream_results)
+          for (const auto &row : rows)
+            std::cout << row_json(row) << '\n';
         if (std::find_if(argv, argv + argc, [](const char *x) {
               return std::string(x) == "--stats";
             }) != argv + argc)
           std::cerr << "{\"rows_scanned\":"
                     << (parquet_query ? scan.rows_read : table->size())
-                    << ",\"rows_returned\":" << rows.size()
+                    << ",\"rows_returned\":"
+                    << (stream_results ? stream.rows_returned : rows.size())
                     << ",\"batches_scanned\":"
                     << (parquet_query ? scan.batches_read
-                                      : (table->size() + batch - 1) / batch)
+                                      : stream_results
+                                            ? stream.batches_scanned
+                                            : (table->size() + batch - 1) / batch)
                     << ",\"columns_scanned\":" << q.columns.size()
                     << ",\"worker_threads\":" << threads
                     << ",\"logical_partitions\":" << threads * 4
@@ -200,13 +258,17 @@ inline int run_cli(int argc, char **argv) {
                     << ",\"spill_bytes_read\":" << spill.bytes_read
                     << ",\"spill_passes\":" << spill.passes
                     << ",\"spilled\":" << (spill.spilled() ? "true" : "false")
+                    << ",\"result_streamed\":"
+                    << (stream_results ? "true" : "false")
+                    << ",\"result_output_bytes\":" << stream.output_bytes
+                    << ",\"result_batches\":" << stream.batches_scanned
                     << "}\n";
       }
       return 0;
     }
     if (command != "bench-server") {
       std::cout << "dremel-cpp query|bench-server --data PATH --threads N "
-                   "--batch-size N [--direct-parquet|--streaming-parquet] [--query-memory-limit-mb N] [--spill-dir PATH] [--sql SQL] "
+                   "--batch-size N [--direct-parquet|--streaming-parquet] [--query-memory-limit-mb N] [--spill-dir PATH] [--stream-results] [--sql SQL] "
                    "[--explain]\n";
       return 0;
     }
