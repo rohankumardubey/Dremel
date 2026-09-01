@@ -15,9 +15,9 @@ It is an independent implementation and is not Google Dremel or BigQuery.
 | --- | --- |
 | Engines | Rust 1.97.1 (Rust 2024) and LLVM Clang 22.1.8 (C++26) |
 | Storage | DREMCOL1, Arrow IPC, and Apache Parquet projection with row-group pruning |
-| Execution | Bounded Parquet and result streaming, spillable aggregation, batched scans, joins and windows |
+| Execution | Bounded Parquet and result streaming, spillable aggregation and external sort, batched scans, joins and windows |
 | Optimizer | Scan filters, transitive predicates, pruning, contradiction elimination, selectivity-aware join ordering and Top-K |
-| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer, 15 Parquet, 5 spill, 5 result streaming and 5 concurrency cases |
+| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer, 15 Parquet, 5 spill, 5 result streaming, 5 external sort and 5 concurrency cases |
 | Validation | Cross-engine typed results, SQLite differential tests and plan assertions |
 
 The toolchains are pinned so a later compiler update does not silently change
@@ -81,7 +81,8 @@ NATIVE=1 \
 ```
 
 `EXTENDED`, `SQL_V1`, `OPTIMIZER`, `CONCURRENCY`, `STORAGE`,
-`MEMORY_BOUNDED`, `PARQUET`, `SPILL`, and `RESULT_STREAMING` default to `1`.
+`MEMORY_BOUNDED`, `PARQUET`, `SPILL`, `RESULT_STREAMING`, and `EXTERNAL_SORT`
+default to `1`.
 Set any of them to `0` to skip that suite. The storage suite verifies equal
 typed results and benchmarks full-file load plus in-memory execution for
 DREMCOL1, Arrow IPC, Parquet Snappy, and Parquet Zstd. On Linux,
@@ -185,11 +186,28 @@ also consume official Arrow-backed Parquet record batches with
 `--streaming-parquet`. Query stats report emitted rows, bytes, batches, and
 peak accounted memory.
 
+Ordered native scans can combine `--stream-results`, `--spill-dir`, and a
+nonzero query memory limit. The external merge sort builds sorted runs within
+the cap, uses bounded fan-in merge passes when needed, and heap-merges the
+final runs directly to typed NDJSON. It supports scalar
+projection and filtering, full `ORDER BY` direction and null placement,
+deterministic ties, `LIMIT`, and `OFFSET`. Spill stats report initial runs,
+temporary files, bytes written/read, and passes. Temporary workspaces are
+removed after success or failure.
+
 ```bash
 ./dremel-cpp/build/dremel-cpp query \
   --data data/events.dremel --query-memory-limit-mb 1 --stream-results \
   --sql "SELECT event_id, country, score FROM events WHERE event_id <= 100000" \
   --stats > result.ndjson
+```
+
+```bash
+./dremel-rs/target/release/dremel-rs query \
+  --data data/events.dremel --query-memory-limit-mb 2 \
+  --spill-dir /tmp/dremel-sort --stream-results \
+  --sql "SELECT event_id, campaign_id, score FROM events ORDER BY score DESC, event_id ASC" \
+  --stats > sorted.ndjson
 ```
 
 Each output line is one JSON array containing typed scalar objects. Streaming
@@ -231,6 +249,7 @@ python3 scripts/differential_test.py
 python3 scripts/test_resource_limits.py
 python3 scripts/test_memory_limits.py
 python3 scripts/test_streaming_results.py
+python3 scripts/test_external_sort.py
 ```
 
 CI runs the same checks on macOS with the pinned toolchains. The `Dockerfile`
@@ -241,9 +260,9 @@ The default Arrow and Parquet path remains an eager full-file control. Direct
 Parquet mode materializes only projected columns and selected row groups.
 Streaming Parquet keeps event scans, aggregates, and primary-key dimension
 joins batch bounded while retaining the same projection and pruning rules.
-Page-index pruning, streaming right/full/non-key joins, external merge sort,
-distributed exchange, durable spill recovery, transactions, and database wire
-protocols remain outside the current scope.
+Page-index pruning, streaming right/full/non-key joins, distributed exchange,
+durable spill recovery, transactions, and database wire protocols remain
+outside the current scope.
 
 The main benchmark also runs `benchmark/memory/manifest.json` with a 256 MiB
 query workspace cap. Set `MEMORY_BOUNDED=0` to skip that suite or change the
@@ -252,3 +271,5 @@ The spill suite uses a 4 MiB cap by default. Set `SPILL=0` to skip it or change
 the cap with `SPILL_MEMORY_LIMIT_MB`. The result-streaming suite uses a 1 MiB
 cap. Set `RESULT_STREAMING=0` to skip it or change the cap with
 `RESULT_STREAM_MEMORY_LIMIT_MB`.
+The external-sort suite uses a 2 MiB cap. Set `EXTERNAL_SORT=0` to skip it or
+change the cap with `SORT_MEMORY_LIMIT_MB`.

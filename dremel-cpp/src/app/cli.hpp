@@ -53,6 +53,19 @@ static void add_result_stream_plan(Query &query, bool enabled,
                           "ResultStreamExec(batch_size=" +
                               std::to_string(batch) + ")");
 }
+static void add_external_sort_plan(Query &query, bool enabled,
+                                   std::size_t batch) {
+  if (!enabled)
+    return;
+  std::erase_if(query.physical, [](const auto &operator_name) {
+    return operator_name.starts_with("SortExec") ||
+           operator_name.starts_with("TopKExec");
+  });
+  query.physical.insert(
+      query.physical.begin() + 1,
+      "ExternalMergeSortExec(runs=auto;batch_size=" +
+          std::to_string(batch) + ")");
+}
 static std::tuple<Rows, ParquetScanMetrics, SpillMetrics> execute_prepared(
     const Query &query, const std::string &path,
     const std::shared_ptr<Table> &table, ThreadPool &pool, std::size_t threads,
@@ -147,12 +160,20 @@ inline int run_cli(int argc, char **argv) {
       if (parquet_query)
         add_parquet_plan(q, path, streaming_parquet, batch);
       add_spill_plan(q, spill_dir, streaming_parquet);
-      if (stream_results && !streamable_result(q))
+      const bool external_sort =
+          stream_results && !parquet_query && spillable_sort(q) &&
+          !spill_dir.empty() && query_memory_limit_mb > 0;
+      if (stream_results && spillable_sort(q) && !external_sort)
+        throw std::runtime_error(
+            "EXTERNAL_SORT_REQUIRES ordered result streaming requires native "
+            "data, --spill-dir, and a nonzero --query-memory-limit-mb");
+      if (stream_results && !streamable_result(q) && !external_sort)
         throw std::runtime_error(
             "STREAMING_UNSUPPORTED result streaming requires a single events "
             "scan with projection/filter and no DISTINCT, aggregation, ORDER "
             "BY, joins, windows, CTEs, unions, or subqueries");
       add_result_stream_plan(q, stream_results, parquet_query, batch);
+      add_external_sort_plan(q, external_sort, batch);
       if (std::find_if(argv, argv + argc, [](const char *x) {
             return std::string(x) == "--explain";
           }) != argv + argc) {
@@ -184,7 +205,10 @@ inline int run_cli(int argc, char **argv) {
               throw std::runtime_error("cannot write streaming result");
             return line.size();
           };
-          if (streaming_parquet) {
+          if (external_sort) {
+            std::tie(stream, spill) = stream_external_sort(
+                q, *table, batch, spill_dir, sink);
+          } else if (streaming_parquet) {
             std::tie(stream, scan) = stream_parquet_results(
                 q, path, batch, memory_limit_mb, sink);
           } else {
