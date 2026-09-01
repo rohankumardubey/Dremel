@@ -10,6 +10,14 @@ static int self_test(const std::string &dir) {
          "{\"t\":\"f\",\"v\":5.0000000000000001e-4}");
   assert(scalar_json(Scalar{std::string{"line\n\t\"\\"}}) ==
          "{\"t\":\"s\",\"v\":\"line\\n\\t\\\"\\\\\"}");
+  const std::vector<Scalar> sort_codec_row{
+      std::monostate{}, std::numeric_limits<std::int64_t>::min(),
+      Decimal{-12345}, -0.0, true,
+      std::string{"line\n\t\"\\ and unicode \xE2\x98\x83"}};
+  const auto encoded_sort_row = encode_sort_row(sort_codec_row);
+  std::vector<char> sort_payload(encoded_sort_row.begin() + 4,
+                                 encoded_sort_row.end());
+  assert(decode_sort_row(sort_payload) == sort_codec_row);
   auto q = Parser("SELECT event_id, duration_ms*2 AS x FROM events WHERE "
                   "campaign_id IS NOT NULL LIMIT 3")
                .parse();

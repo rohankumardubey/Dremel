@@ -104,16 +104,26 @@ admission.
 
 `--stream-results` writes one typed-NDJSON array per row without materializing
 the complete result. It supports scalar projection and filtering over a single
-`events` scan, plus `LIMIT` and `OFFSET`. `DISTINCT`, aggregation, `ORDER BY`,
-joins, windows, CTEs, unions, and subqueries are rejected with
+`events` scan, plus `LIMIT` and `OFFSET`. `DISTINCT`, aggregation, joins,
+windows, CTEs, unions, and subqueries are rejected with
 `STREAMING_UNSUPPORTED`. The same sink accepts official Arrow-backed record
 batches when combined with `--streaming-parquet`.
 
-The streaming path accounts the scan-selection batch, current result row, and
-output encoder buffer. Stats expose emitted rows, output bytes, result batches,
-and current and peak query memory. An output or execution failure can happen
-after earlier rows have been written, so a consumer must require a successful
-process exit before accepting the stream as complete.
+For native DREMCOL1 scans, `ORDER BY` is supported when result streaming is
+combined with `--spill-dir` and a nonzero `--query-memory-limit-mb`. The
+external sort fills in-memory runs up to half of the available query budget,
+writes each run in a private binary workspace, reduces large run sets through
+bounded fan-in merge passes, and heap-merges the final runs into the result
+sink. Ordering direction, explicit or default null placement, deterministic
+output ties, `LIMIT`, and `OFFSET` match the materialized path. Ordered Parquet
+streaming remains unsupported.
+
+The streaming path accounts the scan-selection batch, current result row,
+external-sort run and merge buffers when used, and output encoder buffer. Stats
+expose emitted rows, output bytes, result batches, spill I/O, and current and
+peak query memory. An output or execution failure can happen after earlier rows
+have been written, so a consumer must require a successful process exit before
+accepting the stream as complete.
 
 `--spill-dir` enables automatic disk partitioning for eligible event-table hash
 aggregations when their estimated group state exceeds half of the available

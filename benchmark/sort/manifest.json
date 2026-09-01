@@ -1,0 +1,32 @@
+[
+  {
+    "query_id": "ES001",
+    "category": "integer_sort",
+    "file": "queries/ES001.sql",
+    "description": "Sort 100,000 integer identifiers in descending order"
+  },
+  {
+    "query_id": "ES002",
+    "category": "multi_key_nullable",
+    "file": "queries/ES002.sql",
+    "description": "Sort nullable and dictionary values with three ordering keys"
+  },
+  {
+    "query_id": "ES003",
+    "category": "limit_offset",
+    "file": "queries/ES003.sql",
+    "description": "Use bounded fan-in passes and merge only the requested output page"
+  },
+  {
+    "query_id": "ES004",
+    "category": "computed_key",
+    "file": "queries/ES004.sql",
+    "description": "Sort a computed numeric projection and a deterministic tie breaker"
+  },
+  {
+    "query_id": "ES005",
+    "category": "selective_filter",
+    "file": "queries/ES005.sql",
+    "description": "Sort rows retained by a selective dictionary and boolean filter"
+  }
+]

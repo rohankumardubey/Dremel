@@ -1,8 +1,10 @@
 pub(crate) mod aggregate;
 pub(crate) mod scalar;
+mod sort_spill;
 mod spill;
 mod stream;
 
+pub(crate) use sort_spill::spillable_sort;
 pub(crate) use spill::spillable_aggregate;
 pub(crate) use stream::{stream_parquet_results, stream_table_results, streamable_result};
 
@@ -17,6 +19,7 @@ use std::io::{BufWriter, Write};
 use std::sync::Arc;
 use std::time::Instant;
 
+use sort_spill::stream_external_sort;
 use spill::{execute_spilled_aggregate, should_spill_aggregate};
 
 pub(crate) fn row_bytes(row: &Vec<Scalar>) -> usize {
@@ -619,12 +622,32 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
         q.physical
             .insert(1, "SpillAggregateExec(partitions=auto)".into());
     }
+    let external_sort = o.stream_results
+        && !parquet_query
+        && spillable_sort(&q)
+        && o.spill_dir.is_some()
+        && o.query_memory_limit_mb > 0;
     if o.stream_results {
-        if !streamable_result(&q) {
+        if spillable_sort(&q) && !external_sort {
+            return Err("EXTERNAL_SORT_REQUIRES ordered result streaming requires native data, --spill-dir, and a nonzero --query-memory-limit-mb".into());
+        }
+        if !streamable_result(&q) && !external_sort {
             return Err("STREAMING_UNSUPPORTED result streaming requires a single events scan with projection/filter and no DISTINCT, aggregation, ORDER BY, joins, windows, CTEs, unions, or subqueries".into());
         }
+        if external_sort {
+            q.physical.retain(|operator| {
+                !operator.starts_with("SortExec") && !operator.starts_with("TopKExec")
+            });
+            q.physical.insert(
+                1,
+                format!(
+                    "ExternalMergeSortExec(runs=auto;batch_size={})",
+                    o.batch_size
+                ),
+            );
+        }
         q.physical.insert(
-            if parquet_query { 2 } else { 1 },
+            if parquet_query || external_sort { 2 } else { 1 },
             format!("ResultStreamExec(batch_size={})", o.batch_size),
         );
     }
@@ -653,7 +676,18 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
                     }
                     result.map(|()| bytes)
                 };
-                if o.streaming_parquet {
+                if external_sort {
+                    let (stream, spill) = stream_external_sort(
+                        &q,
+                        &t,
+                        o.batch_size,
+                        o.spill_dir
+                            .as_deref()
+                            .expect("external sort spill directory"),
+                        &mut write_row,
+                    )?;
+                    Ok((stream, ParquetScanMetrics::default(), spill))
+                } else if o.streaming_parquet {
                     stream_parquet_results(
                         &q,
                         &o.data,
@@ -661,14 +695,20 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
                         o.memory_limit_mb,
                         &mut write_row,
                     )
+                    .map(|(stream, scan)| (stream, scan, SpillMetrics::default()))
                 } else if o.direct_parquet {
                     let (table, scan) = Table::load_parquet_direct(&o.data, &q, o.batch_size)?;
                     enforce_table_limit(&o, &table)?;
                     stream_table_results(&q, &table, o.batch_size, &mut write_row)
-                        .map(|metrics| (metrics, scan))
+                        .map(|metrics| (metrics, scan, SpillMetrics::default()))
                 } else {
-                    stream_table_results(&q, &t, o.batch_size, &mut write_row)
-                        .map(|metrics| (metrics, ParquetScanMetrics::default()))
+                    stream_table_results(&q, &t, o.batch_size, &mut write_row).map(|metrics| {
+                        (
+                            metrics,
+                            ParquetScanMetrics::default(),
+                            SpillMetrics::default(),
+                        )
+                    })
                 }
             };
             let flush = writer
@@ -681,7 +721,7 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
             flush?;
             Ok(output)
         });
-        let (stream, scan) = result?;
+        let (stream, scan, spill) = result?;
         if stats {
             let parquet = o.direct_parquet || o.streaming_parquet;
             print_query_stats(
@@ -697,7 +737,7 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
                 started.elapsed().as_nanos(),
                 &query_memory,
                 &scan,
-                &SpillMetrics::default(),
+                &spill,
                 true,
                 &stream,
             );

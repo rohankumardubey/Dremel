@@ -14,12 +14,12 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 static SPILL_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-struct SpillDirectory {
+pub(super) struct SpillDirectory {
     path: PathBuf,
 }
 
 impl SpillDirectory {
-    fn create(root: &str) -> Result<Self, String> {
+    pub(super) fn create(root: &str) -> Result<Self, String> {
         let root = Path::new(root);
         std::fs::create_dir_all(root).map_err(|error| {
             format!("cannot create spill directory {}: {error}", root.display())
@@ -39,6 +39,10 @@ impl SpillDirectory {
             }
         }
         Err("cannot allocate a unique spill workspace".into())
+    }
+
+    pub(super) fn path(&self) -> &Path {
+        &self.path
     }
 }
 
