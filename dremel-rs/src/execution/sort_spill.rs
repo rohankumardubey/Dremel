@@ -4,7 +4,7 @@ use super::spill::SpillDirectory;
 use crate::optimizer::filter_always_false;
 use crate::relational::{compare_output_rows, query_output_order};
 use crate::sql::*;
-use crate::storage::Table;
+use crate::storage::{ParquetScanMetrics, Table};
 use crate::types::*;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -343,18 +343,24 @@ fn merge_runs_to_file(
     Ok(())
 }
 
-pub(crate) fn stream_external_sort<Sink>(
+fn stream_external_sort_from_source<Source, Sink>(
     query: &Query,
-    table: &Table,
     batch_size: usize,
     spill_root: &str,
+    source: Source,
     mut sink: Sink,
-) -> Result<(ResultStreamMetrics, SpillMetrics), String>
+) -> Result<(ResultStreamMetrics, ParquetScanMetrics, SpillMetrics), String>
 where
+    Source:
+        FnOnce(&mut dyn FnMut(&Table) -> Result<(), String>) -> Result<ParquetScanMetrics, String>,
     Sink: FnMut(&[Scalar]) -> Result<usize, String>,
 {
     if query.limit == Some(0) {
-        return Ok((ResultStreamMetrics::default(), SpillMetrics::default()));
+        return Ok((
+            ResultStreamMetrics::default(),
+            ParquetScanMetrics::default(),
+            SpillMetrics::default(),
+        ));
     }
     let memory = current_query_memory().ok_or("external sort requires query memory accounting")?;
     let available = memory
@@ -377,7 +383,7 @@ where
         passes: 1,
         ..SpillMetrics::default()
     };
-    if !filter_always_false(query.filter.as_ref()) {
+    let scan = source(&mut |table| {
         for start in (0..table.len()).step_by(batch_size.max(1)) {
             if execution_cancelled() {
                 return Err("query cancelled during external sort run generation".into());
@@ -420,7 +426,8 @@ where
                 rows.push(row);
             }
         }
-    }
+        Ok(())
+    })?;
     if !rows.is_empty() {
         let path = write_run(
             workspace.path(),
@@ -436,7 +443,7 @@ where
     spill.partitions = paths.len();
     if paths.is_empty() {
         spill.passes = 0;
-        return Ok((stream, spill));
+        return Ok((stream, scan, spill));
     }
     let cursor_budget = available / 2;
     let bytes_per_cursor = IO_BUFFER_BYTES.saturating_add(largest_row.max(1));
@@ -505,7 +512,57 @@ where
         .bytes_read
         .saturating_add(cursors.iter().map(|cursor| cursor.bytes_read).sum());
     spill.passes += 1;
+    Ok((stream, scan, spill))
+}
+
+pub(crate) fn stream_external_sort<Sink>(
+    query: &Query,
+    table: &Table,
+    batch_size: usize,
+    spill_root: &str,
+    sink: Sink,
+) -> Result<(ResultStreamMetrics, SpillMetrics), String>
+where
+    Sink: FnMut(&[Scalar]) -> Result<usize, String>,
+{
+    let source = |consume: &mut dyn FnMut(&Table) -> Result<(), String>| {
+        if !filter_always_false(query.filter.as_ref()) {
+            consume(table)?;
+        }
+        Ok(ParquetScanMetrics::default())
+    };
+    let (stream, _, spill) =
+        stream_external_sort_from_source(query, batch_size, spill_root, source, sink)?;
     Ok((stream, spill))
+}
+
+pub(crate) fn stream_external_sort_parquet<Sink>(
+    query: &Query,
+    path: &str,
+    batch_size: usize,
+    memory_limit_mb: usize,
+    spill_root: &str,
+    sink: Sink,
+) -> Result<(ResultStreamMetrics, ParquetScanMetrics, SpillMetrics), String>
+where
+    Sink: FnMut(&[Scalar]) -> Result<usize, String>,
+{
+    let source = |consume: &mut dyn FnMut(&Table) -> Result<(), String>| {
+        let (_, scan) = Table::stream_parquet_direct(path, query, batch_size, |table| {
+            if memory_limit_mb > 0
+                && table.approximate_bytes() > memory_limit_mb.saturating_mul(1024 * 1024)
+            {
+                return Err(format!(
+                    "RESOURCE_EXHAUSTED decoded Parquet batch requires approximately {} bytes; memory limit is {} MiB",
+                    table.approximate_bytes(),
+                    memory_limit_mb
+                ));
+            }
+            consume(&table)
+        })?;
+        Ok(scan)
+    };
+    stream_external_sort_from_source(query, batch_size, spill_root, source, sink)
 }
 
 #[cfg(test)]
