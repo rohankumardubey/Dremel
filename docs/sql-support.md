@@ -76,8 +76,8 @@ Grouped join results merge `COUNT`, `SUM`, `MIN`, and `MAX` states across
 batches. Right, full, cross, and non-key joins, join queries using `AVG`,
 windows, CTEs, subqueries, `UNION`, and `HAVING` fall back to the materialized
 direct path so they preserve the full SQL behavior. Direct and streaming flags
-are mutually exclusive. Async scheduler submissions do not yet use either
-Parquet query mode.
+are mutually exclusive. Async scheduler submissions support both modes with
+the same prepared plans and result semantics as synchronous execution.
 
 ## Concurrent execution
 
@@ -85,8 +85,11 @@ The long-lived benchmark server has a bounded admission queue, global and
 per-group memory limits, active-query limits, deadlines, cancellation, and a
 4:2:1 priority-weighted scheduler. FIFO order is preserved within each
 priority/resource group. Each admitted request's memory reservation is also
-its hard query workspace cap. The concurrency benchmark reports throughput,
-outcomes, queue and execution latency percentiles, and Jain's fairness index.
+its hard query workspace cap. Direct and streaming Parquet requests use this
+cap for query operators; `--memory-limit-mb` separately bounds decoded event
+tables or batches. Cancellation is checked between decoded batches. The
+concurrency benchmark reports throughput, outcomes, queue and execution latency
+percentiles, and Jain's fairness index.
 
 ## Memory-bounded execution
 

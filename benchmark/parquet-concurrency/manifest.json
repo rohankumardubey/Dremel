@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "scheduler": {
+    "max_active_queries": 4,
+    "queue_capacity": 64,
+    "memory_mb": 1024
+  },
+  "queries": [
+    {
+      "query_id": "CP001",
+      "category": "metadata_count",
+      "file": "queries/CP001.sql",
+      "description": "SELECT COUNT(*) FROM events"
+    },
+    {
+      "query_id": "CP002",
+      "category": "pruned_aggregate",
+      "file": "queries/CP002.sql",
+      "description": "SELECT country, COUNT(*), SUM(bytes) FROM events WHERE event_id <= 100000 GROUP BY country ORDER BY country"
+    },
+    {
+      "query_id": "CP003",
+      "category": "selective_top_k",
+      "file": "queries/CP003.sql",
+      "description": "SELECT event_id, country, score FROM events WHERE event_id BETWEEN 200000 AND 201000 ORDER BY score DESC, event_id ASC LIMIT 25"
+    },
+    {
+      "query_id": "CP004",
+      "category": "dimension_join",
+      "file": "queries/CP004.sql",
+      "description": "SELECT u.segment, COUNT(*) FROM events e JOIN users u ON e.user_id = u.user_id WHERE e.event_id <= 100000 GROUP BY u.segment ORDER BY u.segment"
+    },
+    {
+      "query_id": "CP005",
+      "category": "filtered_projection",
+      "file": "queries/CP005.sql",
+      "description": "SELECT event_id, duration_ms FROM events WHERE event_id <= 100000 AND score >= 99.5 ORDER BY event_id ASC LIMIT 50"
+    }
+  ],
+  "mix": {
+    "request_count": 30,
+    "priorities": [
+      2,
+      0,
+      1,
+      2,
+      1,
+      0,
+      2,
+      1,
+      2,
+      0
+    ],
+    "groups": [
+      "interactive",
+      "batch",
+      "tenant_c"
+    ],
+    "normal_deadline_ms": 15000,
+    "short_deadline_every": 11,
+    "short_deadline_ms": 1,
+    "cancel_every": 13,
+    "reservation_mb": 32
+  }
+}
