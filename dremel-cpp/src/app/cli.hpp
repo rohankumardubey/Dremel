@@ -47,11 +47,12 @@ static void add_spill_plan(Query &query, const std::string &spill_dir,
                           "SpillAggregateExec(partitions=auto)");
 }
 static void add_result_stream_plan(Query &query, bool enabled,
-                                   bool parquet_query, bool ordered_parquet,
-                                   std::size_t batch) {
+                                   bool parquet_query, bool external_sort,
+                                   bool ordered_parquet, std::size_t batch) {
   if (!enabled)
     return;
-  const auto position = ordered_parquet ? 4 : parquet_query ? 2 : 1;
+  const auto position =
+      ordered_parquet ? 4 : (parquet_query || external_sort ? 2 : 1);
   query.physical.insert(query.physical.begin() + position,
                         "ResultStreamExec(batch_size=" +
                             std::to_string(batch) + ")");
@@ -176,7 +177,7 @@ inline int run_cli(int argc, char **argv) {
             "scan with projection/filter and no DISTINCT, aggregation, ORDER "
             "BY, joins, windows, CTEs, unions, or subqueries");
       add_external_sort_plan(q, external_sort, streaming_parquet, batch);
-      add_result_stream_plan(q, stream_results, parquet_query,
+      add_result_stream_plan(q, stream_results, parquet_query, external_sort,
                              streaming_parquet && external_sort, batch);
       if (std::find_if(argv, argv + argc, [](const char *x) {
             return std::string(x) == "--explain";
