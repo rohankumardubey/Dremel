@@ -50,11 +50,13 @@ pub(crate) struct SchedulerState {
 pub(crate) struct SchedulerShared {
     pub(crate) state: Mutex<SchedulerState>,
     pub(crate) changed: Condvar,
-    pub(crate) catalog: Arc<Catalog>,
+    pub(crate) execute: Arc<QueryExecutor>,
     pub(crate) max_active: usize,
     pub(crate) queue_capacity: usize,
     pub(crate) memory_mb: usize,
 }
+
+type QueryExecutor = dyn Fn(&Query) -> Result<Vec<Vec<Scalar>>, String> + Send + Sync;
 
 pub(crate) struct AsyncScheduler {
     pub(crate) shared: Arc<SchedulerShared>,
@@ -83,7 +85,7 @@ pub(crate) fn finish_without_execution(
 }
 
 impl AsyncScheduler {
-    pub(crate) fn new(catalog: Arc<Catalog>, options: &Options) -> Self {
+    pub(crate) fn new(execute: Arc<QueryExecutor>, options: &Options) -> Self {
         let shared = Arc::new(SchedulerShared {
             state: Mutex::new(SchedulerState {
                 queues: std::array::from_fn(|_| std::collections::VecDeque::new()),
@@ -96,7 +98,7 @@ impl AsyncScheduler {
                 shutdown: false,
             }),
             changed: Condvar::new(),
-            catalog,
+            execute,
             max_active: options.max_active_queries.max(1),
             queue_capacity: options.admission_queue_capacity.max(1),
             memory_mb: options.scheduler_memory_mb.max(1),
@@ -196,7 +198,7 @@ impl AsyncScheduler {
                     let previous_memory = current_query_memory();
                     set_query_memory(Some(QueryMemory::new(request.memory_mb)));
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        execute_rel(&request.query, &worker_shared.catalog)
+                        (worker_shared.execute)(&request.query)
                     }));
                     set_query_memory(previous_memory);
                     set_execution_control(None);
@@ -655,11 +657,6 @@ pub fn run_bench_server(o: Options) -> Result<(), String> {
             ),
             "SUBMIT" => {
                 let result = (|| -> Result<(), String> {
-                    if parquet_query {
-                        return Err(
-                            "Parquet query execution is not available for async submissions".into(),
-                        );
-                    }
                     let request_id = *p.get(1).ok_or("missing request id")?;
                     let query_id = *p.get(2).ok_or("missing query id")?;
                     let priority = p
@@ -680,14 +677,24 @@ pub fn run_bench_server(o: Options) -> Result<(), String> {
                         .map_err(|_| "bad memory")?;
                     let include_rows = *p.get(7).unwrap_or(&"0") == "1";
                     let query = prepared.get(query_id).cloned().ok_or("unknown query")?;
-                    if catalog.is_none() {
-                        catalog = Some(Arc::new(Catalog::load(&o.data, table.clone())?));
-                    }
                     if scheduler.is_none() {
-                        scheduler = Some(AsyncScheduler::new(
-                            catalog.as_ref().expect("catalog loaded").clone(),
-                            &o,
-                        ));
+                        let execute: Arc<QueryExecutor> = if parquet_query {
+                            let options = o.clone();
+                            let metadata = table.clone();
+                            Arc::new(move |query| {
+                                let pool = Pool::new(options.threads);
+                                let mut catalog = None;
+                                execute_prepared(&options, query, &metadata, &pool, &mut catalog)
+                                    .map(|(rows, _, _)| rows)
+                            })
+                        } else {
+                            if catalog.is_none() {
+                                catalog = Some(Arc::new(Catalog::load(&o.data, table.clone())?));
+                            }
+                            let shared_catalog = catalog.as_ref().expect("catalog loaded").clone();
+                            Arc::new(move |query| execute_rel(query, &shared_catalog))
+                        };
+                        scheduler = Some(AsyncScheduler::new(execute, &o));
                     }
                     scheduler.as_ref().expect("scheduler created").submit(
                         request_id,

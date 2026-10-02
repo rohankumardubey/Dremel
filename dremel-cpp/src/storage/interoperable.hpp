@@ -608,6 +608,8 @@ load_parquet_direct(const std::string &path, const Query &query,
       selection.row_groups, selection.columns));
   auto table = std::make_shared<Table>();
   for (;;) {
+    if (execution_cancelled())
+      throw std::runtime_error("query cancelled during Parquet scan");
     auto batch = arrow_value(batches->Next());
     if (!batch)
       break;
@@ -635,6 +637,8 @@ stream_parquet_direct(const std::string &path, const Query &query,
       selection.row_groups, selection.columns));
   auto dictionaries = std::make_shared<Table>();
   for (;;) {
+    if (execution_cancelled())
+      throw std::runtime_error("query cancelled during Parquet scan");
     auto batch = arrow_value(batches->Next());
     if (!batch)
       break;

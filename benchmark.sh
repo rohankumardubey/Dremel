@@ -19,6 +19,7 @@ EXTENDED="${EXTENDED:-1}"
 SQL_V1="${SQL_V1:-1}"
 OPTIMIZER="${OPTIMIZER:-1}"
 CONCURRENCY="${CONCURRENCY:-1}"
+PARQUET_CONCURRENCY="${PARQUET_CONCURRENCY:-1}"
 STORAGE="${STORAGE:-1}"
 MEMORY_BOUNDED="${MEMORY_BOUNDED:-1}"
 PARQUET="${PARQUET:-${PARQUET_DIRECT:-1}}"
@@ -31,6 +32,7 @@ SPILL_MEMORY_LIMIT_MB="${SPILL_MEMORY_LIMIT_MB:-4}"
 RESULT_STREAM_MEMORY_LIMIT_MB="${RESULT_STREAM_MEMORY_LIMIT_MB:-1}"
 SORT_MEMORY_LIMIT_MB="${SORT_MEMORY_LIMIT_MB:-2}"
 PARQUET_SORT_DECODED_MEMORY_LIMIT_MB="${PARQUET_SORT_DECODED_MEMORY_LIMIT_MB:-4}"
+PARQUET_CONCURRENCY_MEMORY_LIMIT_MB="${PARQUET_CONCURRENCY_MEMORY_LIMIT_MB:-16}"
 REPORT_OPEN="${REPORT_OPEN:-auto}"
 export LTO NATIVE BENCH_CPUSET CPP_STANDARD
 
@@ -62,14 +64,21 @@ mkdir -p results
 "$PYTHON" scripts/create_sort_workload.py --rows "$DATASET_ROWS"
 "$PYTHON" scripts/create_parquet_sort_workload.py --rows "$DATASET_ROWS"
 "$PYTHON" scripts/create_concurrency_workload.py
+"$PYTHON" scripts/create_parquet_concurrency_workload.py --rows "$DATASET_ROWS"
 "$PYTHON" scripts/generate_data.py --rows "$DATASET_ROWS" --seed "$DATASET_SEED"
 "$PYTHON" scripts/build_column_store.py
 "$PYTHON" scripts/build_interoperable_data.py
 
-echo "Rust toolchain: $(rustc --version)"
-echo "Cargo: $(cargo --version)"
-if [[ "$(rustc --version)" != rustc\ 1.97.1* ]]; then
-  echo "ERROR: Rust 1.97.1 is required (rust-toolchain.toml should select it)." >&2
+RUST_TOOLCHAIN_VERSION="$(awk -F '"' '/^channel = / {print $2; exit}' dremel-rs/rust-toolchain.toml)"
+if [[ -z "$RUST_TOOLCHAIN_VERSION" ]]; then
+  echo "ERROR: missing channel in dremel-rs/rust-toolchain.toml" >&2
+  exit 1
+fi
+RUSTC_VERSION="$(rustc "+$RUST_TOOLCHAIN_VERSION" --version)"
+echo "Rust toolchain: $RUSTC_VERSION"
+echo "Cargo: $(cargo "+$RUST_TOOLCHAIN_VERSION" --version)"
+if [[ "$RUSTC_VERSION" != "rustc $RUST_TOOLCHAIN_VERSION "* ]]; then
+  echo "ERROR: Rust $RUST_TOOLCHAIN_VERSION is required." >&2
   exit 1
 fi
 
@@ -116,10 +125,10 @@ else
   CXX_LTO=OFF
 fi
 
-RUSTFLAGS="$RUSTFLAGS_VALUE" cargo build --manifest-path dremel-rs/Cargo.toml --release
-cargo fmt --manifest-path dremel-rs/Cargo.toml --check
-cargo test --manifest-path dremel-rs/Cargo.toml
-cargo clippy --manifest-path dremel-rs/Cargo.toml --all-targets --all-features -- -D warnings
+RUSTFLAGS="$RUSTFLAGS_VALUE" cargo "+$RUST_TOOLCHAIN_VERSION" build --manifest-path dremel-rs/Cargo.toml --release
+cargo "+$RUST_TOOLCHAIN_VERSION" fmt --manifest-path dremel-rs/Cargo.toml --check
+cargo "+$RUST_TOOLCHAIN_VERSION" test --manifest-path dremel-rs/Cargo.toml
+cargo "+$RUST_TOOLCHAIN_VERSION" clippy --manifest-path dremel-rs/Cargo.toml --all-targets --all-features -- -D warnings
 
 CMAKE_PREFIX_ARGS=()
 if command -v brew >/dev/null 2>&1 && brew --prefix apache-arrow >/dev/null 2>&1; then
@@ -137,6 +146,7 @@ ctest --test-dir dremel-cpp/build --output-on-failure
 "$PYTHON" scripts/test_streaming_results.py
 "$PYTHON" scripts/test_external_sort.py
 "$PYTHON" scripts/test_ordered_parquet_streaming.py
+"$PYTHON" scripts/test_async_parquet.py
 
 "$PYTHON" scripts/run_benchmark.py --data data/events.dremel --threads "$BENCH_THREADS" --batch-size "$BATCH_SIZE" \
   --warmup "$WARMUP" --iterations "$ITERATIONS" --tie-threshold "$TIE_THRESHOLD_PCT"
@@ -161,6 +171,20 @@ fi
 if [[ "$CONCURRENCY" == 1 ]]; then
   "$PYTHON" scripts/run_concurrency_benchmark.py --data data/events.dremel --threads "$BENCH_THREADS" \
     --batch-size "$BATCH_SIZE"
+fi
+
+if [[ "$PARQUET_CONCURRENCY" == 1 ]]; then
+  "$PYTHON" scripts/run_concurrency_benchmark.py --mode direct \
+    --data data/events-snappy.parquet --threads "$BENCH_THREADS" \
+    --batch-size "$BATCH_SIZE" --memory-limit-mb "$PARQUET_CONCURRENCY_MEMORY_LIMIT_MB" \
+    --manifest benchmark/parquet-concurrency/manifest.json \
+    --results-dir results/parquet-concurrency/direct
+  "$PYTHON" scripts/run_concurrency_benchmark.py --mode streaming \
+    --data data/events-snappy.parquet --threads "$BENCH_THREADS" \
+    --batch-size "$BATCH_SIZE" --memory-limit-mb "$PARQUET_CONCURRENCY_MEMORY_LIMIT_MB" \
+    --manifest benchmark/parquet-concurrency/manifest.json \
+    --results-dir results/parquet-concurrency/streaming \
+    --reference results/parquet-concurrency/direct/concurrency.json
 fi
 
 if [[ "$STORAGE" == 1 ]]; then
@@ -234,6 +258,9 @@ if [[ "$EXTENDED" == 1 ]]; then REPORT_ARGS+=(--include extended); fi
 if [[ "$SQL_V1" == 1 ]]; then REPORT_ARGS+=(--include sql); fi
 if [[ "$OPTIMIZER" == 1 ]]; then REPORT_ARGS+=(--include optimizer); fi
 if [[ "$CONCURRENCY" == 1 ]]; then REPORT_ARGS+=(--include concurrency); fi
+if [[ "$PARQUET_CONCURRENCY" == 1 ]]; then
+  REPORT_ARGS+=(--include concurrency-parquet-direct --include concurrency-parquet-streaming)
+fi
 if [[ "$STORAGE" == 1 ]]; then REPORT_ARGS+=(--include storage); fi
 if [[ "$PARQUET" == 1 ]]; then REPORT_ARGS+=(--include parquet); fi
 if [[ "$MEMORY_BOUNDED" == 1 ]]; then REPORT_ARGS+=(--include memory); fi

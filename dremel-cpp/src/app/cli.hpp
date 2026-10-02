@@ -399,20 +399,36 @@ inline int run_cli(int argc, char **argv) {
                   << std::max<std::size_t>(1, (scheduler_memory_mb + 1) / 2);
       } else if (p[0] == "SUBMIT") {
         try {
-          if (parquet_query)
-            throw std::runtime_error(
-                "Parquet query execution is not available for async submissions");
           if (p.size() < 7)
             throw std::runtime_error("missing SUBMIT fields");
           auto found = prepared.find(p[2]);
           if (found == prepared.end())
             throw std::runtime_error("unknown query");
-          if (!catalog)
-            catalog = std::make_shared<Catalog>(Catalog::load(path, table));
-          if (!scheduler)
+          if (!scheduler) {
+            std::function<Rows(const Query &)> execute;
+            if (parquet_query) {
+              execute = [path, table, threads, batch, memory_limit_mb,
+                         direct_parquet, streaming_parquet,
+                         spill_dir](const Query &query) {
+                ThreadPool request_pool(threads);
+                std::shared_ptr<Catalog> request_catalog;
+                auto [rows, scan, spill] = execute_prepared(
+                    query, path, table, request_pool, threads, batch,
+                    memory_limit_mb, direct_parquet, streaming_parquet,
+                    spill_dir, request_catalog);
+                return rows;
+              };
+            } else {
+              if (!catalog)
+                catalog = std::make_shared<Catalog>(Catalog::load(path, table));
+              execute = [catalog](const Query &query) {
+                return execute_rel(query, *catalog);
+              };
+            }
             scheduler = std::make_unique<AsyncScheduler>(
-                catalog, max_active_queries, queue_capacity,
+                std::move(execute), max_active_queries, queue_capacity,
                 scheduler_memory_mb);
+          }
           auto error = scheduler->submit(
               p[1], found->second, std::stoull(p[3]), p[4], std::stoull(p[5]),
               std::stoull(p[6]), p.size() > 7 && p[7] == "1");

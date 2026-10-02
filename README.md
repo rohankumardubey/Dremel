@@ -15,9 +15,9 @@ It is an independent implementation and is not Google Dremel or BigQuery.
 | --- | --- |
 | Engines | Rust 1.97.1 (Rust 2024) and LLVM Clang 22.1.8 (C++26) |
 | Storage | DREMCOL1, Arrow IPC, and Apache Parquet projection with row-group pruning |
-| Execution | Bounded Parquet and result streaming, spillable aggregation and external sort, batched scans, joins and windows |
+| Execution | Bounded Parquet and result streaming, concurrent Parquet queries, spillable aggregation and external sort, batched scans, joins and windows |
 | Optimizer | Scan filters, transitive predicates, pruning, contradiction elimination, selectivity-aware join ordering and Top-K |
-| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer, 15 Parquet, 5 spill, 5 result streaming, 5 external sort, 5 ordered Parquet sort and 5 concurrency cases |
+| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer, 15 Parquet, 5 spill, 5 result streaming, 5 external sort, 5 ordered Parquet sort, 5 concurrency and 5 concurrent Parquet cases |
 | Validation | Cross-engine typed results, SQLite differential tests and plan assertions |
 
 The toolchains are pinned so a later compiler update does not silently change
@@ -81,7 +81,8 @@ NATIVE=1 \
 ```
 
 `EXTENDED`, `SQL_V1`, `OPTIMIZER`, `CONCURRENCY`, `STORAGE`,
-`MEMORY_BOUNDED`, `PARQUET`, `SPILL`, `RESULT_STREAMING`, and `EXTERNAL_SORT`
+`MEMORY_BOUNDED`, `PARQUET`, `SPILL`, `RESULT_STREAMING`, `EXTERNAL_SORT`,
+`PARQUET_SORT`, and `PARQUET_CONCURRENCY`
 default to `1`.
 Set any of them to `0` to skip that suite. The storage suite verifies equal
 typed results and benchmarks full-file load plus in-memory execution for
@@ -151,6 +152,14 @@ subqueries, `UNION`, and `HAVING` use that fallback.
 `users` and `campaigns` are loaded from matching Arrow or Parquet files when a
 query uses those tables. The files are generated deterministically by official
 PyArrow and read through the official Rust and C++ Arrow/Parquet libraries.
+
+The long-lived `bench-server` accepts asynchronous submissions in direct or
+streaming Parquet mode. It applies the same admission queue, resource-group
+reservations, deadlines, and cancellation rules as native queries. Each
+admitted request executes with its own query workspace cap; decoded Parquet
+event tables or batches are bounded separately by `--memory-limit-mb`. The
+concurrent Parquet benchmark checks result hashes against synchronous controls
+in both modes.
 
 Use `--stats` for scan and execution counters. `--memory-limit-mb` limits the
 loaded or materialized table and each decoded streaming batch, while
@@ -257,6 +266,7 @@ python3 scripts/test_memory_limits.py
 python3 scripts/test_streaming_results.py
 python3 scripts/test_external_sort.py
 python3 scripts/test_ordered_parquet_streaming.py
+python3 scripts/test_async_parquet.py
 ```
 
 CI runs the same checks on macOS with the pinned toolchains. The `Dockerfile`
@@ -284,3 +294,6 @@ The ordered Parquet sort suite uses the same query cap plus a 4 MiB decoded
 batch cap by default. Set `PARQUET_SORT=0` to skip it or adjust
 `PARQUET_SORT_DECODED_MEMORY_LIMIT_MB`. Both suites appear in the HTML
 report with separate timing, spill, and Parquet scan metrics.
+The concurrent Parquet suite runs direct and streaming modes over the same
+30-request mix. Set `PARQUET_CONCURRENCY=0` to skip it or adjust the decoded
+table/batch cap with `PARQUET_CONCURRENCY_MEMORY_LIMIT_MB`.

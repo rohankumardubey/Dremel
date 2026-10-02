@@ -1,7 +1,7 @@
 use super::{CampaignsTable, Table, UsersTable};
 use crate::execution::scalar::cmp;
 use crate::sql::{Expr, Query};
-use crate::types::Scalar;
+use crate::types::{Scalar, execution_cancelled};
 use arrow::array::{
     Array, ArrayRef, BooleanArray, Decimal128Array, Float64Array, Int64Array, StringArray,
 };
@@ -343,6 +343,9 @@ pub(crate) fn load_parquet_direct(
         .map_err(|error| error.to_string())?;
     let mut table = Table::empty();
     for batch in reader {
+        if execution_cancelled() {
+            return Err("query cancelled during Parquet scan".into());
+        }
         append_projected_batch(&mut table, &batch.map_err(|error| error.to_string())?)?;
         metrics.batches_read += 1;
         metrics.peak_decoded_batch_bytes = table.approximate_bytes();
@@ -374,6 +377,9 @@ where
     let mut device = super::Dictionary::default();
     let mut event = super::Dictionary::default();
     for batch in reader {
+        if execution_cancelled() {
+            return Err("query cancelled during Parquet scan".into());
+        }
         let mut table = Table::empty();
         table.country_dict = country;
         table.device_dict = device;

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import statistics
@@ -194,15 +195,25 @@ def main() -> int:
     )
     parser.add_argument("--cpp", default=str(ROOT / "dremel-cpp/build/dremel-cpp"))
     parser.add_argument("--data", default=str(ROOT / "data/events.dremel"))
+    parser.add_argument("--mode", choices=("native", "direct", "streaming"), default="native")
+    parser.add_argument("--memory-limit-mb", type=int, default=0)
+    parser.add_argument("--reference", type=Path)
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument(
         "--manifest", type=Path, default=ROOT / "benchmark/concurrency/manifest.json"
     )
-    parser.add_argument(
-        "--results-dir", type=Path, default=ROOT / "results/concurrency"
-    )
+    parser.add_argument("--results-dir", type=Path)
     args = parser.parse_args()
+    if args.mode != "native" and not args.data.endswith(".parquet"):
+        parser.error("Parquet concurrency modes require a .parquet data file")
+    if args.memory_limit_mb < 0:
+        parser.error("--memory-limit-mb must be nonnegative")
+    digest = hashlib.sha256()
+    with open(args.data, "rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    dataset_sha256 = digest.hexdigest()
     manifest = json.loads(args.manifest.read_text())
     scheduler = manifest["scheduler"]
     tail = [
@@ -220,6 +231,9 @@ def main() -> int:
         "--scheduler-memory-mb",
         str(scheduler["memory_mb"]),
     ]
+    if args.mode != "native":
+        tail.extend(("--direct-parquet" if args.mode == "direct" else "--streaming-parquet",
+                     "--memory-limit-mb", str(args.memory_limit_mb)))
     servers: list[Server] = []
     try:
         rust = Server("Rust", [args.rust, *tail])
@@ -227,6 +241,7 @@ def main() -> int:
         cpp = Server("C++", [args.cpp, *tail])
         servers.append(cpp)
         references = {}
+        reference_scans = {}
         for query in manifest["queries"]:
             query_id = query["query_id"]
             sql = (
@@ -238,13 +253,33 @@ def main() -> int:
             rust.prepare(query_id, sql)
             cpp.prepare(query_id, sql)
             _, rust_rows = rust.execute(query_id, True)
+            rust_scan = rust.last_scan_metrics.copy()
             _, cpp_rows = cpp.execute(query_id, True)
+            cpp_scan = cpp.last_scan_metrics.copy()
+            if args.mode != "native":
+                selection_fields = (
+                    "total_rows", "rows_read", "total_row_groups",
+                    "row_groups_read", "total_columns", "columns_read",
+                    "compressed_bytes_read", "streaming_fallback",
+                )
+                if any(rust_scan.get(key) != cpp_scan.get(key) for key in selection_fields):
+                    raise RuntimeError(f"{query_id}: Rust and C++ Parquet scans differ")
+                if args.memory_limit_mb and any(
+                    scan.get("peak_decoded_batch_bytes", 0)
+                    > args.memory_limit_mb * 1024 * 1024
+                    for scan in (rust_scan, cpp_scan)
+                ):
+                    raise RuntimeError(f"{query_id}: decoded Parquet memory cap exceeded")
             ordered = "ORDER BY" in sql.upper()
             correct, detail = compare_rows(rust_rows, cpp_rows, ordered)
             if not correct:
                 raise RuntimeError(f"reference {query_id} mismatch: {detail}")
             references[query_id] = rust_rows
+            reference_scans[query_id] = {"rust": rust_scan, "cpp": cpp_scan}
         results = {
+            "storage_mode": args.mode,
+            "dataset": args.data,
+            "dataset_sha256": dataset_sha256,
             "configuration": scheduler,
             "workload": manifest["mix"],
             "reference_hashes": {
@@ -258,13 +293,26 @@ def main() -> int:
                 )
                 for query_id, rows in references.items()
             },
+            "reference_scans": reference_scans,
             "rust": run_mix("rust", rust, manifest, references),
             "cpp": run_mix("cpp", cpp, manifest, references),
         }
-        out = args.results_dir.resolve()
+        if args.reference:
+            reference = json.loads(args.reference.read_text())
+            if results["dataset_sha256"] != reference.get("dataset_sha256"):
+                raise RuntimeError("concurrent Parquet modes used different datasets")
+            if results["reference_hashes"] != reference["reference_hashes"]:
+                raise RuntimeError("concurrent Parquet modes produced different reference results")
+            results["cross_mode_reference_match"] = True
+        default_results = (
+            ROOT / "results/concurrency"
+            if args.mode == "native"
+            else ROOT / "results/parquet-concurrency" / args.mode
+        )
+        out = (args.results_dir or default_results).resolve()
         out.mkdir(parents=True, exist_ok=True)
         (out / "concurrency.json").write_text(json.dumps(results, indent=2) + "\n")
-        lines = ["CONCURRENT WORKLOAD BENCHMARK"]
+        lines = [f"CONCURRENT WORKLOAD BENCHMARK ({args.mode})"]
         for engine in ("rust", "cpp"):
             summary = results[engine]["summary"]
             lines += [

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "protocol.hpp"
+#include <functional>
 
 namespace dremel {
 
@@ -33,7 +34,7 @@ struct SchedulerShared {
   std::mutex mutex;
   std::condition_variable changed;
   SchedulerState state;
-  std::shared_ptr<const Catalog> catalog;
+  std::function<Rows(const Query &)> execute;
   std::size_t max_active{}, queue_capacity{}, memory_mb{};
 };
 class AsyncScheduler {
@@ -57,10 +58,11 @@ class AsyncScheduler {
   }
 
 public:
-  AsyncScheduler(std::shared_ptr<const Catalog> catalog, std::size_t max_active,
+  AsyncScheduler(std::function<Rows(const Query &)> execute,
+                 std::size_t max_active,
                  std::size_t queue_capacity, std::size_t memory_mb)
       : shared_(std::make_shared<SchedulerShared>()) {
-    shared_->catalog = std::move(catalog);
+    shared_->execute = std::move(execute);
     shared_->max_active = std::max<std::size_t>(1, max_active);
     shared_->queue_capacity = std::max<std::size_t>(1, queue_capacity);
     shared_->memory_mb = std::max<std::size_t>(1, memory_mb);
@@ -138,7 +140,7 @@ public:
           Rows rows;
           std::string error;
           try {
-            rows = execute_rel(request->query, *shared->catalog);
+            rows = shared->execute(request->query);
           } catch (const std::exception &exception) {
             error = exception.what();
           }
