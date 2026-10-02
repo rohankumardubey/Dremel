@@ -16,10 +16,12 @@ jobs:
           python3 -m venv .venv
           .venv/bin/pip install -r requirements.txt
       - name: Rust checks
+        working-directory: dremel-rs
         run: |
-          cargo fmt --manifest-path dremel-rs/Cargo.toml --check
-          cargo test --manifest-path dremel-rs/Cargo.toml
-          cargo clippy --manifest-path dremel-rs/Cargo.toml --all-targets --all-features -- -D warnings
+          rustc --version
+          cargo fmt --check
+          cargo test
+          cargo clippy --all-targets --all-features -- -D warnings
       - name: C++26 checks
         run: |
           cmake --fresh -S dremel-cpp -B dremel-cpp/build -DCMAKE_BUILD_TYPE=Release \
