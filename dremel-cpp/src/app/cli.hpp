@@ -47,14 +47,17 @@ static void add_spill_plan(Query &query, const std::string &spill_dir,
                           "SpillAggregateExec(partitions=auto)");
 }
 static void add_result_stream_plan(Query &query, bool enabled,
-                                   bool parquet_query, std::size_t batch) {
-  if (enabled)
-    query.physical.insert(query.physical.begin() + (parquet_query ? 2 : 1),
-                          "ResultStreamExec(batch_size=" +
-                              std::to_string(batch) + ")");
+                                   bool parquet_query, bool ordered_parquet,
+                                   std::size_t batch) {
+  if (!enabled)
+    return;
+  const auto position = ordered_parquet ? 4 : parquet_query ? 2 : 1;
+  query.physical.insert(query.physical.begin() + position,
+                        "ResultStreamExec(batch_size=" +
+                            std::to_string(batch) + ")");
 }
 static void add_external_sort_plan(Query &query, bool enabled,
-                                   std::size_t batch) {
+                                   bool streaming_parquet, std::size_t batch) {
   if (!enabled)
     return;
   std::erase_if(query.physical, [](const auto &operator_name) {
@@ -62,7 +65,7 @@ static void add_external_sort_plan(Query &query, bool enabled,
            operator_name.starts_with("TopKExec");
   });
   query.physical.insert(
-      query.physical.begin() + 1,
+      query.physical.begin() + (streaming_parquet ? 3 : 1),
       "ExternalMergeSortExec(runs=auto;batch_size=" +
           std::to_string(batch) + ")");
 }
@@ -161,19 +164,20 @@ inline int run_cli(int argc, char **argv) {
         add_parquet_plan(q, path, streaming_parquet, batch);
       add_spill_plan(q, spill_dir, streaming_parquet);
       const bool external_sort =
-          stream_results && !parquet_query && spillable_sort(q) &&
+          stream_results && !direct_parquet && spillable_sort(q) &&
           !spill_dir.empty() && query_memory_limit_mb > 0;
       if (stream_results && spillable_sort(q) && !external_sort)
         throw std::runtime_error(
             "EXTERNAL_SORT_REQUIRES ordered result streaming requires native "
-            "data, --spill-dir, and a nonzero --query-memory-limit-mb");
+            "data or --streaming-parquet, --spill-dir, and a nonzero --query-memory-limit-mb");
       if (stream_results && !streamable_result(q) && !external_sort)
         throw std::runtime_error(
             "STREAMING_UNSUPPORTED result streaming requires a single events "
             "scan with projection/filter and no DISTINCT, aggregation, ORDER "
             "BY, joins, windows, CTEs, unions, or subqueries");
-      add_result_stream_plan(q, stream_results, parquet_query, batch);
-      add_external_sort_plan(q, external_sort, batch);
+      add_external_sort_plan(q, external_sort, streaming_parquet, batch);
+      add_result_stream_plan(q, stream_results, parquet_query,
+                             streaming_parquet && external_sort, batch);
       if (std::find_if(argv, argv + argc, [](const char *x) {
             return std::string(x) == "--explain";
           }) != argv + argc) {
@@ -206,8 +210,12 @@ inline int run_cli(int argc, char **argv) {
             return line.size();
           };
           if (external_sort) {
-            std::tie(stream, spill) = stream_external_sort(
-                q, *table, batch, spill_dir, sink);
+            if (streaming_parquet)
+              std::tie(stream, scan, spill) = stream_external_sort_parquet(
+                  q, path, batch, memory_limit_mb, spill_dir, sink);
+            else
+              std::tie(stream, spill) = stream_external_sort(
+                  q, *table, batch, spill_dir, sink);
           } else if (streaming_parquet) {
             std::tie(stream, scan) = stream_parquet_results(
                 q, path, batch, memory_limit_mb, sink);

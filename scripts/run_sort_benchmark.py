@@ -56,6 +56,8 @@ def run_query(
     batch_size: int,
     memory_limit_mb: int | None,
     external: bool,
+    streaming_parquet: bool = False,
+    decoded_memory_limit_mb: int = 4,
 ) -> dict:
     command = [
         engine,
@@ -74,6 +76,8 @@ def run_query(
     if external:
         temporary = tempfile.TemporaryDirectory(prefix="dremel-sort-bench-")
         command.extend(("--stream-results", "--spill-dir", temporary.name))
+        if streaming_parquet:
+            command.extend(("--streaming-parquet", "--memory-limit-mb", str(decoded_memory_limit_mb)))
     started = time.perf_counter_ns()
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert process.stdout and process.stderr
@@ -122,11 +126,11 @@ def run_query(
 
 
 def explain(
-    engine: str, data: str, sql: str, batch_size: int, memory_limit_mb: int
+    engine: str, data: str, sql: str, batch_size: int, memory_limit_mb: int,
+    streaming_parquet: bool,
 ) -> list[str]:
     with tempfile.TemporaryDirectory(prefix="dremel-sort-plan-") as directory:
-        result = subprocess.run(
-            [
+        command = [
                 engine,
                 "query",
                 "--data",
@@ -141,7 +145,11 @@ def explain(
                 "--sql",
                 sql,
                 "--explain",
-            ],
+            ]
+        if streaming_parquet:
+            command.append("--streaming-parquet")
+        result = subprocess.run(
+            command,
             text=True,
             capture_output=True,
             check=False,
@@ -160,6 +168,8 @@ def main() -> int:
     parser.add_argument("--data", default=str(ROOT / "data/events.dremel"))
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--memory-limit-mb", type=int, default=2)
+    parser.add_argument("--decoded-memory-limit-mb", type=int, default=4)
+    parser.add_argument("--streaming-parquet", action="store_true")
     parser.add_argument("--warmup", type=int, default=int(os.getenv("WARMUP", "3")))
     parser.add_argument(
         "--iterations", type=int, default=int(os.getenv("ITERATIONS", "20"))
@@ -177,8 +187,11 @@ def main() -> int:
         or args.warmup < 0
         or args.iterations < 1
         or args.tie_threshold < 0
+        or args.decoded_memory_limit_mb < 1
     ):
         parser.error("memory limit must be at least 2 MiB; other values must be valid")
+    if args.streaming_parquet and args.data and not args.data.endswith(".parquet"):
+        parser.error("--streaming-parquet requires a .parquet data file")
 
     manifest = json.loads(args.manifest.read_text())
     records = []
@@ -188,10 +201,12 @@ def main() -> int:
         query_id = item["query_id"]
         sql = (args.manifest.parent / item["file"]).read_text().strip()
         rust_plan = explain(
-            args.rust, args.data, sql, args.batch_size, args.memory_limit_mb
+            args.rust, args.data, sql, args.batch_size, args.memory_limit_mb,
+            args.streaming_parquet,
         )
         cpp_plan = explain(
-            args.cpp, args.data, sql, args.batch_size, args.memory_limit_mb
+            args.cpp, args.data, sql, args.batch_size, args.memory_limit_mb,
+            args.streaming_parquet,
         )
         if rust_plan != cpp_plan or not any(
             operator.startswith("ExternalMergeSortExec") for operator in rust_plan
@@ -208,7 +223,8 @@ def main() -> int:
             ("cpp_materialized", args.cpp, None, False),
         ):
             modes[label] = run_query(
-                engine, args.data, sql, args.batch_size, limit, external
+                engine, args.data, sql, args.batch_size, limit, external,
+                args.streaming_parquet, args.decoded_memory_limit_mb,
             )
         if any(result["returncode"] != 0 for result in modes.values()):
             raise RuntimeError(f"{query_id}: correctness mode failed: {modes}")
@@ -229,6 +245,11 @@ def main() -> int:
                 or stats.get("query_memory_peak_bytes", 2**63)
                 > args.memory_limit_mb * 1024 * 1024
                 or result["spill_leftovers"]
+                or (args.streaming_parquet and (
+                    stats.get("parquet_row_groups_read", 0) < 1
+                    or stats.get("parquet_peak_decoded_batch_bytes", 2**63)
+                    > args.decoded_memory_limit_mb * 1024 * 1024
+                ))
             ):
                 raise RuntimeError(f"{query_id}: invalid external-sort stats: {result}")
         limited_rejections = {}
@@ -289,6 +310,8 @@ def main() -> int:
                         args.batch_size,
                         args.memory_limit_mb,
                         True,
+                        args.streaming_parquet,
+                        args.decoded_memory_limit_mb,
                     )
             samples = {"rust": [], "cpp": []}
             for iteration in range(args.iterations):
@@ -305,6 +328,8 @@ def main() -> int:
                         args.batch_size,
                         args.memory_limit_mb,
                         True,
+                        args.streaming_parquet,
+                        args.decoded_memory_limit_mb,
                     )
                     actual = (
                         result["rows"],
@@ -359,6 +384,8 @@ def main() -> int:
             "warmup": args.warmup,
             "iterations": args.iterations,
             "tie_threshold_pct": args.tie_threshold,
+            "streaming_parquet": args.streaming_parquet,
+            "decoded_memory_limit_mb": args.decoded_memory_limit_mb if args.streaming_parquet else None,
         },
         "validate_only": args.validate_only,
         "correct": len(records),
@@ -370,8 +397,9 @@ def main() -> int:
         "queries": records,
     }
     args.results_dir.mkdir(parents=True, exist_ok=True)
-    (args.results_dir / "sort.json").write_text(json.dumps(output, indent=2) + "\n")
-    with (args.results_dir / "sort.csv").open("w", newline="") as file:
+    stem = "parquet-sort" if args.streaming_parquet else "sort"
+    (args.results_dir / f"{stem}.json").write_text(json.dumps(output, indent=2) + "\n")
+    with (args.results_dir / f"{stem}.csv").open("w", newline="") as file:
         writer = csv.DictWriter(
             file,
             fieldnames=(
@@ -409,7 +437,7 @@ def main() -> int:
                 }
             )
     lines = [
-        "EXTERNAL MERGE SORT BENCHMARK",
+        "ORDERED PARQUET STREAMING BENCHMARK" if args.streaming_parquet else "EXTERNAL MERGE SORT BENCHMARK",
         f"Queries: {len(records)} / {len(records)} correct",
         f"Query memory limit: {args.memory_limit_mb} MiB",
     ]
@@ -421,7 +449,8 @@ def main() -> int:
             )
         )
     (args.results_dir / "report.txt").write_text("\n".join(lines) + "\n")
-    print(f"External merge sort correctness: {len(records)} / {len(records)} PASS")
+    title = "Ordered Parquet streaming" if args.streaming_parquet else "External merge sort"
+    print(f"{title} correctness: {len(records)} / {len(records)} PASS")
     return 0
 
 

@@ -19,7 +19,7 @@ use std::io::{BufWriter, Write};
 use std::sync::Arc;
 use std::time::Instant;
 
-use sort_spill::stream_external_sort;
+use sort_spill::{stream_external_sort, stream_external_sort_parquet};
 use spill::{execute_spilled_aggregate, should_spill_aggregate};
 
 pub(crate) fn row_bytes(row: &Vec<Scalar>) -> usize {
@@ -623,13 +623,13 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
             .insert(1, "SpillAggregateExec(partitions=auto)".into());
     }
     let external_sort = o.stream_results
-        && !parquet_query
+        && !o.direct_parquet
         && spillable_sort(&q)
         && o.spill_dir.is_some()
         && o.query_memory_limit_mb > 0;
     if o.stream_results {
         if spillable_sort(&q) && !external_sort {
-            return Err("EXTERNAL_SORT_REQUIRES ordered result streaming requires native data, --spill-dir, and a nonzero --query-memory-limit-mb".into());
+            return Err("EXTERNAL_SORT_REQUIRES ordered result streaming requires native data or --streaming-parquet, --spill-dir, and a nonzero --query-memory-limit-mb".into());
         }
         if !streamable_result(&q) && !external_sort {
             return Err("STREAMING_UNSUPPORTED result streaming requires a single events scan with projection/filter and no DISTINCT, aggregation, ORDER BY, joins, windows, CTEs, unions, or subqueries".into());
@@ -639,7 +639,7 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
                 !operator.starts_with("SortExec") && !operator.starts_with("TopKExec")
             });
             q.physical.insert(
-                1,
+                if o.streaming_parquet { 3 } else { 1 },
                 format!(
                     "ExternalMergeSortExec(runs=auto;batch_size={})",
                     o.batch_size
@@ -647,7 +647,13 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
             );
         }
         q.physical.insert(
-            if parquet_query || external_sort { 2 } else { 1 },
+            if o.streaming_parquet && external_sort {
+                4
+            } else if parquet_query || external_sort {
+                2
+            } else {
+                1
+            },
             format!("ResultStreamExec(batch_size={})", o.batch_size),
         );
     }
@@ -677,16 +683,29 @@ pub fn run_query(o: Options, sql: &str, explain: bool, stats: bool) -> Result<()
                     result.map(|()| bytes)
                 };
                 if external_sort {
-                    let (stream, spill) = stream_external_sort(
-                        &q,
-                        &t,
-                        o.batch_size,
-                        o.spill_dir
-                            .as_deref()
-                            .expect("external sort spill directory"),
-                        &mut write_row,
-                    )?;
-                    Ok((stream, ParquetScanMetrics::default(), spill))
+                    if o.streaming_parquet {
+                        stream_external_sort_parquet(
+                            &q,
+                            &o.data,
+                            o.batch_size,
+                            o.memory_limit_mb,
+                            o.spill_dir
+                                .as_deref()
+                                .expect("external sort spill directory"),
+                            &mut write_row,
+                        )
+                    } else {
+                        let (stream, spill) = stream_external_sort(
+                            &q,
+                            &t,
+                            o.batch_size,
+                            o.spill_dir
+                                .as_deref()
+                                .expect("external sort spill directory"),
+                            &mut write_row,
+                        )?;
+                        Ok((stream, ParquetScanMetrics::default(), spill))
+                    }
                 } else if o.streaming_parquet {
                     stream_parquet_results(
                         &q,

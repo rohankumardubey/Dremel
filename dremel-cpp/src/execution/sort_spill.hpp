@@ -295,12 +295,13 @@ static void merge_sort_runs(const std::vector<std::filesystem::path> &paths,
   ++metrics.files_created;
 }
 
-template <class Sink>
-static std::pair<ResultStreamMetrics, SpillMetrics> stream_external_sort(
-    const Query &query, const Table &table, std::size_t batch_size,
-    const std::string &spill_root, Sink &sink) {
+template <class Source, class Sink>
+static std::tuple<ResultStreamMetrics, ParquetScanMetrics, SpillMetrics>
+stream_external_sort_from_source(const Query &query, std::size_t batch_size,
+                                 const std::string &spill_root, Source source,
+                                 Sink &sink) {
   if (query.limit == 0)
-    return {ResultStreamMetrics{}, SpillMetrics{}};
+    return {ResultStreamMetrics{}, ParquetScanMetrics{}, SpillMetrics{}};
   if (!query_memory)
     throw std::runtime_error(
         "external sort requires query memory accounting");
@@ -321,7 +322,7 @@ static std::pair<ResultStreamMetrics, SpillMetrics> stream_external_sort(
   SpillMetrics spill{0, 0, 0, 0, 1};
   const auto batch = std::max<std::size_t>(1, batch_size);
   const auto order = output_order(query);
-  if (!filter_always_false(query.filter)) {
+  const auto scan = source([&](const Table &table) {
     for (std::size_t start = 0; start < table.size(); start += batch) {
       if (execution_cancelled())
         throw std::runtime_error(
@@ -350,14 +351,14 @@ static std::pair<ResultStreamMetrics, SpillMetrics> stream_external_sort(
         rows.push_back(std::move(row));
       }
     }
-  }
+  });
   if (!rows.empty())
     paths.push_back(write_sort_run(workspace.path(), paths.size(), order, rows,
                                    reserved, spill));
   spill.partitions = paths.size();
   if (paths.empty()) {
     spill.passes = 0;
-    return {stream, spill};
+    return {stream, scan, spill};
   }
   const auto cursor_budget = available / 2;
   const auto bytes_per_cursor =
@@ -437,7 +438,45 @@ static std::pair<ResultStreamMetrics, SpillMetrics> stream_external_sort(
   for (const auto &cursor : cursors)
     spill.bytes_read += cursor->bytes_read;
   ++spill.passes;
+  return {stream, scan, spill};
+}
+
+template <class Sink>
+static std::pair<ResultStreamMetrics, SpillMetrics> stream_external_sort(
+    const Query &query, const Table &table, std::size_t batch_size,
+    const std::string &spill_root, Sink &sink) {
+  auto source = [&](auto consume) {
+    if (!filter_always_false(query.filter))
+      consume(table);
+    return ParquetScanMetrics{};
+  };
+  auto [stream, scan, spill] = stream_external_sort_from_source(
+      query, batch_size, spill_root, source, sink);
   return {stream, spill};
+}
+
+template <class Sink>
+static std::tuple<ResultStreamMetrics, ParquetScanMetrics, SpillMetrics>
+stream_external_sort_parquet(const Query &query, const std::string &path,
+                             std::size_t batch_size,
+                             std::size_t memory_limit_mb,
+                             const std::string &spill_root, Sink &sink) {
+  auto source = [&](auto consume) {
+    const auto [dictionaries, scan] = stream_parquet_direct(
+        path, query, batch_size, [&](std::shared_ptr<Table> table) {
+          if (memory_limit_mb &&
+              table->approximate_bytes() > memory_limit_mb * 1024 * 1024)
+            throw std::runtime_error(
+                "RESOURCE_EXHAUSTED decoded Parquet batch requires " +
+                std::to_string(table->approximate_bytes()) +
+                " bytes; memory limit is " +
+                std::to_string(memory_limit_mb) + " MiB");
+          consume(*table);
+        });
+    return scan;
+  };
+  return stream_external_sort_from_source(query, batch_size, spill_root,
+                                          source, sink);
 }
 
 } // namespace dremel

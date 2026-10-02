@@ -109,14 +109,16 @@ windows, CTEs, unions, and subqueries are rejected with
 `STREAMING_UNSUPPORTED`. The same sink accepts official Arrow-backed record
 batches when combined with `--streaming-parquet`.
 
-For native DREMCOL1 scans, `ORDER BY` is supported when result streaming is
+For native DREMCOL1 and `--streaming-parquet` scans, `ORDER BY` is supported when result streaming is
 combined with `--spill-dir` and a nonzero `--query-memory-limit-mb`. The
 external sort fills in-memory runs up to half of the available query budget,
 writes each run in a private binary workspace, reduces large run sets through
 bounded fan-in merge passes, and heap-merges the final runs into the result
 sink. Ordering direction, explicit or default null placement, deterministic
-output ties, `LIMIT`, and `OFFSET` match the materialized path. Ordered Parquet
-streaming remains unsupported.
+output ties, `LIMIT`, and `OFFSET` match the materialized path. Parquet scans
+retain projected-column decoding and row-group pruning. `--memory-limit-mb`
+caps each decoded Parquet batch separately from the sort's query memory cap.
+`--direct-parquet` cannot be combined with ordered result streaming.
 
 The streaming path accounts the scan-selection batch, current result row,
 external-sort run and merge buffers when used, and output encoder buffer. Stats
@@ -147,6 +149,6 @@ operator spilled. Queries outside this shape retain the existing
 
 DDL/DML, transactions, recursive CTEs, stored procedures, user-defined
 functions, locale-aware collations, named time zones, arbitrary-precision
-decimals, Parquet page-index pruning, external merge sort, durable spill
+decimals, Parquet page-index pruning, durable spill
 recovery, distributed execution, and database wire protocols are not
 implemented.

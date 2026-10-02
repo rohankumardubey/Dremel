@@ -1,0 +1,32 @@
+[
+  {
+    "query_id": "PS001",
+    "category": "leading_row_groups",
+    "file": "queries/PS001.sql",
+    "description": "Sort projected rows from leading Parquet row groups"
+  },
+  {
+    "query_id": "PS002",
+    "category": "nullable_dictionary",
+    "file": "queries/PS002.sql",
+    "description": "Sort nullable and dictionary values with explicit null placement"
+  },
+  {
+    "query_id": "PS003",
+    "category": "multipass",
+    "file": "queries/PS003.sql",
+    "description": "Generate bounded runs across all row groups and merge an output page"
+  },
+  {
+    "query_id": "PS004",
+    "category": "late_row_groups",
+    "file": "queries/PS004.sql",
+    "description": "Prune to late row groups before sorting a computed projection"
+  },
+  {
+    "query_id": "PS005",
+    "category": "selective_filter",
+    "file": "queries/PS005.sql",
+    "description": "Sort selectively filtered rows from dictionary and boolean columns"
+  }
+]

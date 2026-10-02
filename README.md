@@ -17,7 +17,7 @@ It is an independent implementation and is not Google Dremel or BigQuery.
 | Storage | DREMCOL1, Arrow IPC, and Apache Parquet projection with row-group pruning |
 | Execution | Bounded Parquet and result streaming, spillable aggregation and external sort, batched scans, joins and windows |
 | Optimizer | Scan filters, transitive predicates, pruning, contradiction elimination, selectivity-aware join ordering and Top-K |
-| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer, 15 Parquet, 5 spill, 5 result streaming, 5 external sort and 5 concurrency cases |
+| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer, 15 Parquet, 5 spill, 5 result streaming, 5 external sort, 5 ordered Parquet sort and 5 concurrency cases |
 | Validation | Cross-engine typed results, SQLite differential tests and plan assertions |
 
 The toolchains are pinned so a later compiler update does not silently change
@@ -186,7 +186,7 @@ also consume official Arrow-backed Parquet record batches with
 `--streaming-parquet`. Query stats report emitted rows, bytes, batches, and
 peak accounted memory.
 
-Ordered native scans can combine `--stream-results`, `--spill-dir`, and a
+Ordered native scans and `--streaming-parquet` scans can combine `--stream-results`, `--spill-dir`, and a
 nonzero query memory limit. The external merge sort builds sorted runs within
 the cap, uses bounded fan-in merge passes when needed, and heap-merges the
 final runs directly to typed NDJSON. It supports scalar
@@ -194,6 +194,12 @@ projection and filtering, full `ORDER BY` direction and null placement,
 deterministic ties, `LIMIT`, and `OFFSET`. Spill stats report initial runs,
 temporary files, bytes written/read, and passes. Temporary workspaces are
 removed after success or failure.
+
+For Parquet, add `--streaming-parquet` and point `--data` at a `.parquet`
+file. Projected batches and selected row groups feed the same external sort
+used by native scans. `--memory-limit-mb` bounds each decoded batch; the query
+memory limit bounds sorted runs and merge buffers. Ordered streaming is not
+supported with `--direct-parquet`.
 
 ```bash
 ./dremel-cpp/build/dremel-cpp query \
@@ -250,6 +256,7 @@ python3 scripts/test_resource_limits.py
 python3 scripts/test_memory_limits.py
 python3 scripts/test_streaming_results.py
 python3 scripts/test_external_sort.py
+python3 scripts/test_ordered_parquet_streaming.py
 ```
 
 CI runs the same checks on macOS with the pinned toolchains. The `Dockerfile`
@@ -273,3 +280,7 @@ cap. Set `RESULT_STREAMING=0` to skip it or change the cap with
 `RESULT_STREAM_MEMORY_LIMIT_MB`.
 The external-sort suite uses a 2 MiB cap. Set `EXTERNAL_SORT=0` to skip it or
 change the cap with `SORT_MEMORY_LIMIT_MB`.
+The ordered Parquet sort suite uses the same query cap plus a 4 MiB decoded
+batch cap by default. Set `PARQUET_SORT=0` to skip it or adjust
+`PARQUET_SORT_DECODED_MEMORY_LIMIT_MB`. Both suites appear in the HTML
+report with separate timing, spill, and Parquet scan metrics.
