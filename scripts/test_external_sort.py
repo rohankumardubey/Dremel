@@ -38,6 +38,7 @@ def query(engine: Path, extra: list[str]) -> subprocess.CompletedProcess[bytes]:
 
 signatures = []
 multipass_signatures = []
+plans = []
 for engine in ENGINES:
     with tempfile.TemporaryDirectory(prefix="dremel-sort-test-") as directory:
         spilled = query(
@@ -83,6 +84,7 @@ for engine in ENGINES:
     assert explained.returncode == 0, (engine, explained.stderr.decode())
     assert "ExternalMergeSortExec" in plan and "ResultStreamExec" in plan, plan
     assert "\n  SortExec" not in plan and "\n  TopKExec" not in plan, plan
+    plans.append([line.strip() for line in plan.splitlines() if line.strip()])
 
     missing_configuration = query(engine, ["--stream-results"])
     assert missing_configuration.returncode != 0 and "EXTERNAL_SORT_REQUIRES" in (
@@ -140,4 +142,5 @@ for engine in ENGINES:
 
 assert signatures[0] == signatures[1], signatures
 assert multipass_signatures[0] == multipass_signatures[1], multipass_signatures
+assert plans[0] == plans[1], plans
 print("External merge sort: 20 / 20 PASS")
