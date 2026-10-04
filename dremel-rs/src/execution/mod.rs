@@ -222,7 +222,7 @@ fn streamable_parquet_join(query: &Query) -> bool {
     }
     let supported_select = query.select.iter().all(|item| match &item.expr {
         Expr::Column(_) => true,
-        Expr::Func(name, _) => matches!(name.as_str(), "count" | "sum" | "min" | "max"),
+        Expr::Func(name, _) => matches!(name.as_str(), "count" | "sum" | "avg" | "min" | "max"),
         _ => false,
     });
     supported_select
@@ -264,8 +264,34 @@ fn merge_finished_aggregate(state: &mut AggState, value: &Scalar) -> Result<(), 
                 *current = Some(value.clone());
             }
         }
-        AggState::Avg { .. } => return Err("streaming join AVG requires materialization".into()),
+        AggState::Avg { .. } => return Err("streaming AVG requires a partial count".into()),
     }
+    Ok(())
+}
+
+fn merge_finished_average(
+    state: &mut AggState,
+    value: &Scalar,
+    partial_count: &Scalar,
+) -> Result<(), String> {
+    let (AggState::Avg { sum, count }, Scalar::Int(batch_count)) = (state, partial_count) else {
+        return Err("invalid streaming AVG partial count".into());
+    };
+    if *batch_count < 0 {
+        return Err("invalid streaming AVG partial count".into());
+    }
+    if *batch_count == 0 {
+        return if matches!(value, Scalar::Null) {
+            Ok(())
+        } else {
+            Err("invalid streaming AVG partial value".into())
+        };
+    }
+    let Scalar::Float(batch_average) = value else {
+        return Err("invalid streaming AVG partial value".into());
+    };
+    *sum += batch_average * (*batch_count as f64);
+    *count += *batch_count as u64;
     Ok(())
 }
 
@@ -283,6 +309,16 @@ fn execute_parquet_streaming_join(
     batch_query.offset = 0;
     let mut catalog = Catalog::load(path, Arc::new(Table::empty()))?;
     if aggregate {
+        let avg_arguments = query.select.iter().filter_map(|item| match &item.expr {
+            Expr::Func(name, argument) if name == "avg" => Some(argument.clone()),
+            _ => None,
+        });
+        batch_query
+            .select
+            .extend(avg_arguments.map(|argument| SelectItem {
+                expr: Expr::Func("count".into(), argument),
+                alias: None,
+            }));
         let template = states(query);
         let mut groups =
             std::collections::HashMap::<Vec<ScalarKey>, (Vec<Scalar>, Vec<AggState>)>::new();
@@ -322,9 +358,19 @@ fn execute_parquet_streaming_join(
                     }
                     let states = &mut groups.get_mut(&key).expect("group inserted").1;
                     let mut aggregate_index = 0;
+                    let mut average_index = 0;
                     for (item, value) in query.select.iter().zip(&row) {
                         if is_agg(&item.expr) {
-                            merge_finished_aggregate(&mut states[aggregate_index], value)?;
+                            if matches!(&item.expr, Expr::Func(name, _) if name == "avg") {
+                                merge_finished_average(
+                                    &mut states[aggregate_index],
+                                    value,
+                                    &row[query.select.len() + average_index],
+                                )?;
+                                average_index += 1;
+                            } else {
+                                merge_finished_aggregate(&mut states[aggregate_index], value)?;
+                            }
                             aggregate_index += 1;
                         }
                     }

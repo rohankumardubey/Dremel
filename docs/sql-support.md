@@ -72,8 +72,9 @@ the fallback state.
 Inner and left joins from `events` to `users.user_id` or
 `campaigns.campaign_id` stream fact batches through a cached primary-key index.
 Nonaggregate joins support global ordering, Top-K, offsets, and distinctness.
-Grouped join results merge `COUNT`, `SUM`, `MIN`, and `MAX` states across
-batches. Right, full, cross, and non-key joins, join queries using `AVG`,
+Grouped join results merge `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX` states across
+batches. For `AVG`, each batch supplies its non-null count so partial averages
+are weighted correctly. Right, full, cross, and non-key joins,
 windows, CTEs, subqueries, `UNION`, and `HAVING` fall back to the materialized
 direct path so they preserve the full SQL behavior. Direct and streaming flags
 are mutually exclusive. Async scheduler submissions support both modes with
