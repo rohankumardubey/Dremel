@@ -169,6 +169,9 @@ The reference CLI is `benchmarks/cpp/build/dremel-cpp`; it accepts the same
 
 This is a single-node, fixed-schema research engine. It does not yet implement
 the paper's multi-level serving tree or generic nested-field SQL execution.
+The Rust storage boundary can now read arbitrary Arrow IPC and Parquet schemas
+through `ColumnarTable`, but SQL still converts the three built-in tables to
+fixed execution layouts. The generic-schema migration is in progress.
 There is a repetition/definition-level round-trip example, but it is not
 connected to the query engine. Distributed storage and exchange, fault
 tolerance, transactions, database wire protocols, and durable spill recovery
