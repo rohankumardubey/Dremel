@@ -191,22 +191,37 @@ fn production_scalar_expressions() {
 #[test]
 fn relational_hash_join_and_having() {
     let events = fixture();
-    let mut users = UsersTable {
-        user_id: vec![10, 11, 12],
-        segment: vec!["pro".into(), "free".into(), "free".into()],
-        signup_date: vec!["2024-01-01".into(); 3],
-        lifetime_value: vec![1000, 2000, 3000],
-        region: vec!["apac".into(); 3],
-        active: vec![true, false, true],
-        index: std::collections::HashMap::new(),
-    };
-    for (row, &id) in users.user_id.iter().enumerate() {
-        users.index.entry(id).or_default().push(row);
-    }
+    let users = DimensionTable::from_users_rows(vec![
+        (
+            10,
+            "pro".into(),
+            "2024-01-01".into(),
+            1000,
+            "apac".into(),
+            true,
+        ),
+        (
+            11,
+            "free".into(),
+            "2024-01-01".into(),
+            2000,
+            "apac".into(),
+            false,
+        ),
+        (
+            12,
+            "free".into(),
+            "2024-01-01".into(),
+            3000,
+            "apac".into(),
+            true,
+        ),
+    ])
+    .unwrap();
     let catalog = Catalog {
         events: events.clone(),
         users,
-        campaigns: CampaignsTable::default(),
+        campaigns: DimensionTable::default(),
     };
     let joined = prepare(
         Parser::new("SELECT e.event_id, u.segment FROM events e INNER JOIN users u ON e.user_id = u.user_id WHERE u.active = true ORDER BY event_id ASC")
@@ -243,8 +258,8 @@ fn window_partition_order_and_frames() {
     let events = fixture();
     let catalog = Catalog {
         events: events.clone(),
-        users: UsersTable::default(),
-        campaigns: CampaignsTable::default(),
+        users: DimensionTable::default(),
+        campaigns: DimensionTable::default(),
     };
     let ranked = prepare(
         Parser::new("SELECT event_id, ROW_NUMBER() OVER (PARTITION BY country ORDER BY score DESC) AS rn, SUM(bytes) OVER (PARTITION BY country ORDER BY event_id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_bytes FROM events ORDER BY event_id ASC")
@@ -284,8 +299,8 @@ fn materialized_cte() {
     let events = fixture();
     let catalog = Catalog {
         events: events.clone(),
-        users: UsersTable::default(),
-        campaigns: CampaignsTable::default(),
+        users: DimensionTable::default(),
+        campaigns: DimensionTable::default(),
     };
     let query = prepare(
         Parser::new("WITH totals AS (SELECT country, SUM(bytes) AS total FROM events GROUP BY country) SELECT country, total FROM totals WHERE total > 200 ORDER BY country ASC")
@@ -307,16 +322,26 @@ fn scalar_exists_in_and_correlated_subqueries() {
     let events = fixture();
     let catalog = Catalog {
         events: events.clone(),
-        users: UsersTable::default(),
-        campaigns: CampaignsTable {
-            campaign_id: vec![7, 9],
-            campaign_name: vec!["seven".into(), "nine".into()],
-            budget: vec![7000, 9000],
-            start_date: vec!["2024-01-01".into(); 2],
-            end_date: vec!["2024-02-01".into(); 2],
-            channel: vec!["search".into(); 2],
-            index: std::collections::HashMap::new(),
-        },
+        users: DimensionTable::default(),
+        campaigns: DimensionTable::from_campaign_rows(vec![
+            (
+                7,
+                "seven".into(),
+                7000,
+                "2024-01-01".into(),
+                "2024-02-01".into(),
+                "search".into(),
+            ),
+            (
+                9,
+                "nine".into(),
+                9000,
+                "2024-01-01".into(),
+                "2024-02-01".into(),
+                "search".into(),
+            ),
+        ])
+        .unwrap(),
     };
     let scalar = prepare(
         Parser::new("SELECT event_id, (SELECT MAX(budget) FROM campaigns) AS max_budget FROM events WHERE event_id <= 2 ORDER BY event_id ASC")

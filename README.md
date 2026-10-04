@@ -25,6 +25,11 @@ and it is not production-ready.
 See [SQL support](docs/sql-support.md) for exact syntax, execution-mode
 restrictions, and unsupported features.
 
+Arrow IPC and Parquet dimension tables retain their typed columns and any
+additional fields in the storage layer. Current SQL binding still exposes the
+fixed `events`, `users`, and `campaigns` columns, and the event execution path
+still uses its specialized layout.
+
 ## Quick start
 
 You need Rust with `rustup` and Python 3.11 or newer. The repository pins Rust
