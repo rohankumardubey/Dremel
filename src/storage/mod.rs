@@ -5,7 +5,9 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::sync::Arc;
 
+mod columnar;
 mod interoperable;
+pub use columnar::ColumnarTable;
 pub(crate) use interoperable::ParquetScanMetrics;
 
 #[derive(Clone, Default)]

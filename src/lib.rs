@@ -12,6 +12,7 @@ pub mod nested;
 
 pub use execution::run_query;
 pub use server::run_bench_server;
+pub use storage::ColumnarTable;
 pub use types::{Options, Scalar};
 
 #[cfg(test)]

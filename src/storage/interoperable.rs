@@ -1,4 +1,4 @@
-use super::{CampaignsTable, Table, UsersTable};
+use super::{CampaignsTable, ColumnarTable, Table, UsersTable};
 use crate::execution::scalar::cmp;
 use crate::sql::{Expr, Query};
 use crate::types::{Scalar, execution_cancelled};
@@ -7,7 +7,6 @@ use arrow::array::{
 };
 use arrow::compute::cast;
 use arrow::datatypes::DataType;
-use arrow::ipc::reader::FileReader;
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -403,22 +402,7 @@ where
 }
 
 fn read_batches(path: &Path) -> Result<Vec<RecordBatch>, String> {
-    let file =
-        File::open(path).map_err(|error| format!("cannot open {}: {error}", path.display()))?;
-    if path.extension().and_then(|value| value.to_str()) == Some("arrow") {
-        FileReader::try_new(file, None)
-            .map_err(|error| error.to_string())?
-            .map(|batch| batch.map_err(|error| error.to_string()))
-            .collect()
-    } else {
-        ParquetRecordBatchReaderBuilder::try_new(file)
-            .map_err(|error| error.to_string())?
-            .with_batch_size(65_536)
-            .build()
-            .map_err(|error| error.to_string())?
-            .map(|batch| batch.map_err(|error| error.to_string()))
-            .collect()
-    }
+    Ok(ColumnarTable::read(path)?.into_batches())
 }
 
 fn load_batches(batches: Vec<RecordBatch>) -> Result<Table, String> {
