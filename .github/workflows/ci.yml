@@ -2,34 +2,44 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
-  test:
+  rust:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Install toolchains
+      - name: Install Rust
         run: |
           rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
-          brew install llvm cmake apache-arrow
-          python3 -m venv .venv
-          .venv/bin/pip install -r requirements.txt
       - name: Rust checks
-        working-directory: dremel-rs
         run: |
           rustc --version
           cargo fmt --check
           cargo test
           cargo clippy --all-targets --all-features -- -D warnings
+
+  benchmarks:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install benchmark dependencies
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
+          brew install llvm cmake apache-arrow
+          python3 -m venv .venv
+          .venv/bin/pip install -r benchmarks/requirements.txt
       - name: C++26 checks
         run: |
-          cmake --fresh -S dremel-cpp -B dremel-cpp/build -DCMAKE_BUILD_TYPE=Release \
+          cmake --fresh -S benchmarks/cpp -B benchmarks/cpp/build -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++ \
             -DCMAKE_PREFIX_PATH=/opt/homebrew/opt/apache-arrow \
             -DDREMEL_CXX_STANDARD=26
-          cmake --build dremel-cpp/build -j
-          ctest --test-dir dremel-cpp/build --output-on-failure
+          cmake --build benchmarks/cpp/build -j
+          ctest --test-dir benchmarks/cpp/build --output-on-failure
       - name: Cross-engine smoke benchmark
         env:
           DATASET_ROWS: 20000

@@ -1,0 +1,17 @@
+[package]
+name = "dremel"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arrow = { version = "59.2.0", default-features = false, features = ["ipc"] }
+parquet = { version = "59.2.0", default-features = false, features = ["arrow", "snap", "zstd"] }
+
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 1
+panic = "abort"
+
+[features]
+lto = []
