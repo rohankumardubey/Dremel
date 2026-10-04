@@ -124,9 +124,37 @@ QUERIES = [
     ),
     (
         "P015",
-        "join_avg_fallback",
+        "streaming_join_avg",
         f"SELECT u.segment, AVG(e.score) FROM events e JOIN users u ON e.user_id = u.user_id WHERE e.event_id <= {prefix_end} GROUP BY u.segment ORDER BY u.segment",
         3,
+        2,
+    ),
+    (
+        "P016",
+        "streaming_left_join_nullable_avg",
+        f"SELECT c.channel, AVG(e.campaign_id), COUNT(e.campaign_id) FROM events e LEFT JOIN campaigns c ON e.campaign_id = c.campaign_id WHERE e.event_id <= {prefix_end} GROUP BY c.channel ORDER BY c.channel NULLS FIRST",
+        2,
+        2,
+    ),
+    (
+        "P017",
+        "streaming_join_multiple_avg",
+        f"SELECT AVG(e.score), AVG(e.duration_ms), COUNT(e.score) FROM events e JOIN users u ON e.user_id = u.user_id WHERE e.event_id <= {prefix_end}",
+        4,
+        2,
+    ),
+    (
+        "P018",
+        "streaming_join_empty_avg",
+        "SELECT AVG(e.score), COUNT(e.score) FROM events e JOIN users u ON e.user_id = u.user_id WHERE e.event_id < 0",
+        3,
+        0,
+    ),
+    (
+        "P019",
+        "streaming_join_decimal_avg",
+        f"SELECT u.segment, AVG(u.lifetime_value) FROM events e JOIN users u ON e.user_id = u.user_id WHERE e.event_id <= {prefix_end} GROUP BY u.segment ORDER BY u.segment",
+        2,
         2,
     ),
 ]
@@ -145,7 +173,7 @@ for query_id, category, sql, expected_columns, maximum_row_groups in QUERIES:
             "description": sql,
             "expected_columns_read": expected_columns,
             "maximum_row_groups_read": maximum_row_groups,
-            "expected_streaming_fallback": query_id in ("P009", "P015"),
+            "expected_streaming_fallback": query_id == "P009",
         }
     )
 (base / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

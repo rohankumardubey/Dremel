@@ -1328,7 +1328,8 @@ static bool streamable_parquet_join(const Query &query) {
         return item.expr->kind == ExprKind::column ||
                (item.expr->kind == ExprKind::function &&
                 (item.expr->text == "count" || item.expr->text == "sum" ||
-                 item.expr->text == "min" || item.expr->text == "max"));
+                 item.expr->text == "avg" || item.expr->text == "min" ||
+                 item.expr->text == "max"));
       });
   return supported_select &&
          std::all_of(query.group_by.begin(), query.group_by.end(),
@@ -1374,8 +1375,25 @@ static void merge_finished_aggregate(Agg &state, const Scalar &value) {
       state.has = true;
     }
   } else {
-    throw std::runtime_error("streaming join AVG requires materialization");
+    throw std::runtime_error("streaming AVG requires a partial count");
   }
+}
+
+static void merge_finished_average(Agg &state, const Scalar &value,
+                                   const Scalar &partial_count) {
+  const auto *batch_count = std::get_if<std::int64_t>(&partial_count);
+  if (state.kind != Agg::Kind::avg || !batch_count || *batch_count < 0)
+    throw std::runtime_error("invalid streaming AVG partial count");
+  if (*batch_count == 0) {
+    if (!std::holds_alternative<std::monostate>(value))
+      throw std::runtime_error("invalid streaming AVG partial value");
+    return;
+  }
+  const auto *batch_average = std::get_if<double>(&value);
+  if (!batch_average)
+    throw std::runtime_error("invalid streaming AVG partial value");
+  state.sum += *batch_average * static_cast<double>(*batch_count);
+  state.count += static_cast<std::uint64_t>(*batch_count);
 }
 
 struct StreamingRelGroup {
@@ -1404,6 +1422,13 @@ static std::pair<Rows, ParquetScanMetrics> execute_parquet_streaming_join(
   batch_query.offset = 0;
   auto catalog = Catalog::load(path, std::make_shared<Table>());
   if (aggregate) {
+    for (const auto &item : query.select)
+      if (item.expr->kind == ExprKind::function && item.expr->text == "avg") {
+        auto count = node(ExprKind::function);
+        count->text = "count";
+        count->left = item.expr->left;
+        batch_query.select.push_back(SelectItem{count, std::nullopt});
+      }
     const auto initial = states(query);
     std::unordered_map<std::string, StreamingRelGroup> groups;
     if (query.group_by.empty())
@@ -1436,10 +1461,17 @@ static std::pair<Rows, ParquetScanMetrics> execute_parquet_streaming_join(
             }
             auto &aggregate_states = groups.at(key).states;
             std::size_t aggregate_index = 0;
+            std::size_t average_index = 0;
             for (std::size_t index = 0; index < query.select.size(); ++index)
-              if (is_agg(query.select[index].expr))
-                merge_finished_aggregate(
-                    aggregate_states[aggregate_index++], row[index]);
+              if (is_agg(query.select[index].expr)) {
+                auto &state = aggregate_states[aggregate_index++];
+                if (query.select[index].expr->text == "avg")
+                  merge_finished_average(
+                      state, row[index],
+                      row[query.select.size() + average_index++]);
+                else
+                  merge_finished_aggregate(state, row[index]);
+              }
           }
         });
     (void)dictionaries;

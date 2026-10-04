@@ -17,7 +17,7 @@ It is an independent implementation and is not Google Dremel or BigQuery.
 | Storage | DREMCOL1, Arrow IPC, and Apache Parquet projection with row-group pruning |
 | Execution | Bounded Parquet and result streaming, concurrent Parquet queries, spillable aggregation and external sort, batched scans, joins and windows |
 | Optimizer | Scan filters, transitive predicates, pruning, contradiction elimination, selectivity-aware join ordering and Top-K |
-| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer, 15 Parquet, 5 spill, 5 result streaming, 5 external sort, 5 ordered Parquet sort, 5 concurrency and 5 concurrent Parquet cases |
+| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer, 19 Parquet, 5 spill, 5 result streaming, 5 external sort, 5 ordered Parquet sort, 5 concurrency and 5 concurrent Parquet cases |
 | Validation | Cross-engine typed results, SQLite differential tests and plan assertions |
 
 The toolchains are pinned so a later compiler update does not silently change
@@ -137,10 +137,10 @@ Use `--streaming-parquet` instead to pass projected Parquet record batches
 directly into scans, aggregates, and eligible dimension joins. Inner and left
 joins from `events` to the `users.user_id` or `campaigns.campaign_id` primary
 key stream each fact batch through a cached dimension index. Global Top-K,
-`DISTINCT`, and grouped `COUNT`, `SUM`, `MIN`, and `MAX` are merged across
+`DISTINCT`, and grouped `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX` are merged across
 batches. `--batch-size` sets the maximum decoded batch size, and `--stats`
 reports the batch count, peak decoded batch bytes, and whether the query used
-the materialized fallback. Other join shapes, `AVG` over joins, windows, CTEs,
+the materialized fallback. Other join shapes, windows, CTEs,
 subqueries, `UNION`, and `HAVING` use that fallback.
 
 ```bash
