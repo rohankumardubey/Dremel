@@ -1,10 +1,13 @@
 use super::ColumnarTable;
 use crate::types::Scalar;
-use arrow::array::{Array, ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray};
+use arrow::array::{
+    Array, ArrayRef, BooleanArray, DictionaryArray, Float64Array, Int64Array, StringArray,
+    UInt32Array,
+};
 use arrow::compute::{cast, concat_batches};
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, UInt32Type};
 
-const COLUMNS: [(&str, DataType); 11] = [
+pub(super) const COLUMNS: [(&str, DataType); 11] = [
     ("event_id", DataType::Int64),
     ("user_id", DataType::Int64),
     ("timestamp", DataType::Int64),
@@ -19,21 +22,56 @@ const COLUMNS: [(&str, DataType); 11] = [
 ];
 
 /// Typed access to the current SQL columns without discarding the source schema.
-/// Eager Arrow and Parquet batches are coalesced once for constant-time row lookup.
+/// Multiple eager batches are coalesced once for constant-time row lookup.
 pub(crate) struct EventColumnar {
     data: ColumnarTable,
     cast_bytes: usize,
     event_id: Int64Array,
     user_id: Int64Array,
     timestamp: Int64Array,
-    country: StringArray,
-    device: StringArray,
-    event_type: StringArray,
+    country: TextColumn,
+    device: TextColumn,
+    event_type: TextColumn,
     duration: Int64Array,
     bytes: Int64Array,
     score: Float64Array,
     success: BooleanArray,
     campaign: Int64Array,
+}
+
+enum TextColumn {
+    Plain(StringArray),
+    Dictionary {
+        keys: UInt32Array,
+        values: StringArray,
+    },
+}
+
+impl TextColumn {
+    fn new(array: &ArrayRef) -> Self {
+        if let Some(dictionary) = array.as_any().downcast_ref::<DictionaryArray<UInt32Type>>() {
+            Self::Dictionary {
+                keys: dictionary.keys().clone(),
+                values: typed(dictionary.values()),
+            }
+        } else {
+            Self::Plain(typed(array))
+        }
+    }
+
+    fn value(&self, row: usize) -> &str {
+        match self {
+            Self::Plain(values) => values.value(row),
+            Self::Dictionary { keys, values } => values.value(keys.value(row) as usize),
+        }
+    }
+
+    fn key(&self, row: usize) -> Option<u32> {
+        match self {
+            Self::Plain(_) => None,
+            Self::Dictionary { keys, .. } => Some(keys.value(row)),
+        }
+    }
 }
 
 impl EventColumnar {
@@ -46,9 +84,18 @@ impl EventColumnar {
             let array = batch
                 .column_by_name(name)
                 .ok_or_else(|| format!("missing required column {name}"))?;
-            let needs_cast = array.data_type() != data_type;
-            let array = cast(array, data_type)
-                .map_err(|error| format!("invalid {name} column: {error}"))?;
+            let dictionary_text = *data_type == DataType::Utf8
+                && matches!(
+                    array.data_type(),
+                    DataType::Dictionary(key, value)
+                        if **key == DataType::UInt32 && **value == DataType::Utf8
+                );
+            let needs_cast = array.data_type() != data_type && !dictionary_text;
+            let array = if needs_cast {
+                cast(array, data_type).map_err(|error| format!("invalid {name} column: {error}"))?
+            } else {
+                array.clone()
+            };
             if needs_cast {
                 cast_bytes = cast_bytes.saturating_add(array.get_array_memory_size());
             }
@@ -64,9 +111,9 @@ impl EventColumnar {
             event_id: typed(&columns[0]),
             user_id: typed(&columns[1]),
             timestamp: typed(&columns[2]),
-            country: typed(&columns[3]),
-            device: typed(&columns[4]),
-            event_type: typed(&columns[5]),
+            country: TextColumn::new(&columns[3]),
+            device: TextColumn::new(&columns[4]),
+            event_type: TextColumn::new(&columns[5]),
             duration: typed(&columns[6]),
             bytes: typed(&columns[7]),
             score: typed(&columns[8]),
@@ -99,6 +146,15 @@ impl EventColumnar {
             "device" => self.device.value(row),
             "event_type" => self.event_type.value(row),
             _ => panic!("unknown event string column {column}"),
+        }
+    }
+
+    pub(crate) fn dictionary_key(&self, column: &str, row: usize) -> Option<u32> {
+        match column {
+            "country" => self.country.key(row),
+            "device" => self.device.key(row),
+            "event_type" => self.event_type.key(row),
+            _ => None,
         }
     }
 
