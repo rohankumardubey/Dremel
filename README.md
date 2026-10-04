@@ -1,337 +1,180 @@
 # Dremel
 
-A Rust columnar query engine under active development. It currently runs SQL
-against the included `events`, `users`, and `campaigns` schema. The C++ engine
-is retained under `benchmarks/` as a correctness and performance reference,
-not as a second product implementation.
+[![CI](https://github.com/rohankumardubey/Dremel/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/rohankumardubey/Dremel/actions/workflows/ci.yml)
 
-The design borrows the columnar layout and nested-record ideas described in the
-[Dremel paper](https://research.google/pubs/dremel-interactive-analysis-of-web-scale-datasets-2/).
-It is an independent implementation and is not Google Dremel or BigQuery.
-It is not production-ready yet. The paper's multi-level serving tree, generic
-nested-field execution, and distributed storage are not implemented.
+An experimental columnar SQL engine written in Rust. It executes analytical
+queries over a fixed `events`, `users`, and `campaigns` schema, with Apache
+Arrow and Parquet support. A matching C++ implementation lives under
+`benchmarks/` for correctness checks and performance comparisons.
 
-## What is included
+The project is inspired by the [Dremel research paper](https://research.google.com/pubs/archive/36632.pdf),
+but is an independent implementation. It is not Google Dremel or BigQuery,
+and it is not production-ready.
 
-| Area | Implementation |
+## What works today
+
+| Area | Current support |
 | --- | --- |
-| Main engine | Rust 1.97.1 (Rust 2024) |
-| Benchmark reference | LLVM Clang 22.1.8 (C++26) |
-| Storage | DREMCOL1, Arrow IPC, and Apache Parquet projection with row-group pruning |
-| Execution | Bounded Parquet and result streaming, concurrent Parquet queries, spillable aggregation and external sort, batched scans, joins and windows |
-| Optimizer | Scan filters, transitive predicates, pruning, contradiction elimination, selectivity-aware join ordering and Top-K |
-| Workloads | 64 baseline, 16 hardening, 68 SQL, 12 optimizer, 19 Parquet, 5 spill, 5 result streaming, 5 external sort, 5 ordered Parquet sort, 5 concurrency and 5 concurrent Parquet cases |
-| Validation | Cross-engine typed results, SQLite differential tests and plan assertions |
+| SQL | Joins, aggregates, CTEs, subqueries, unions, window functions, ordering, and Top-K |
+| Storage | Native DREMCOL1 files, Arrow IPC, and Apache Parquet |
+| Parquet scans | Projected-column reads, row-group pruning, batch streaming, and eligible dimension joins |
+| Execution | Parallel batched scans, query memory limits, spillable aggregation, external sort, and streamed results |
+| Planning | Predicate pushdown, projection pruning, constant folding, join selection and ordering, and runtime filters |
+| Validation | Cross-engine result checks, SQLite differential tests, plan assertions, and workload benchmarks |
 
-The toolchains are pinned so a later compiler update does not silently change
-the comparison. Rust's `2024` label is the language edition, not the compiler
-release year.
+See [SQL support](docs/sql-support.md) for exact syntax, execution-mode
+restrictions, and unsupported features.
 
 ## Quick start
 
-To build the Rust engine, install Rust 1.97.1 with `rustfmt` and `clippy`, then
-run:
+You need Rust with `rustup` and Python 3.11 or newer. The repository pins Rust
+1.97.1; Cargo uses that toolchain through `rust-toolchain.toml`.
 
 ```bash
 cargo build --release
-```
-
-To generate a small sample and execute a query, also install Python 3.11 or
-newer:
-
-```bash
 python3 benchmarks/scripts/generate_data.py --rows 20000
 python3 benchmarks/scripts/build_column_store.py
-./target/release/dremel query --data data/events.dremel \
-  --sql "SELECT country, COUNT(*) FROM events GROUP BY country"
+./target/release/dremel query \
+  --data data/events.dremel \
+  --sql "SELECT country, COUNT(*) AS events FROM events GROUP BY country ORDER BY events DESC"
 ```
 
-The full cross-engine benchmark additionally requires:
+The CLI prints one typed JSON array per result row. Add `--explain` to inspect
+the physical plan, or `--stats` for scan and execution counters.
 
-- CMake 3.20 or newer
-- LLVM Clang 22 with C++26 support
-- Apache Arrow C++ and Parquet 25.0.1
-- PyArrow 25.0.1 from `benchmarks/requirements.txt`
+## Querying Parquet
 
-On macOS, install the native dependencies and Python package with:
+The native sample above needs no Python packages. To generate Arrow IPC and
+Parquet versions of the same data, install the pinned PyArrow dependency:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r benchmarks/requirements.txt
+.venv/bin/python benchmarks/scripts/build_interoperable_data.py
+```
+
+The default Parquet path loads the file before execution. Use
+`--direct-parquet` to decode selected columns and row groups per query, or
+`--streaming-parquet` to pass projected batches into supported operators:
+
+```bash
+./target/release/dremel query \
+  --data data/events-snappy.parquet --streaming-parquet \
+  --batch-size 4096 \
+  --sql "SELECT country, COUNT(*) FROM events GROUP BY country" \
+  --stats
+```
+
+The two flags are mutually exclusive. Some query shapes fall back to
+materialization in streaming mode; `--stats` reports when that happens. See
+[Parquet execution](docs/sql-support.md#parquet-execution) for the supported
+streaming shapes and pruning rules.
+
+## Memory and result streaming
+
+`--query-memory-limit-mb` caps accounted query workspace, while
+`--memory-limit-mb` separately caps the loaded table or decoded Parquet batch.
+Eligible grouped queries can spill to disk when a spill directory is provided.
+Result streaming emits typed NDJSON without retaining the full result:
+
+```bash
+./target/release/dremel query \
+  --data data/events.dremel \
+  --query-memory-limit-mb 2 \
+  --spill-dir /tmp/dremel-sort \
+  --stream-results \
+  --sql "SELECT event_id, score FROM events ORDER BY score DESC, event_id ASC" \
+  > sorted.ndjson
+```
+
+This ordered query uses external merge sort. Streaming output is complete only
+when the process exits successfully. Memory caps are operator-accounting
+limits, not process RSS limits; unsupported or over-budget queries return an
+error. Details and eligibility rules are in
+[Memory-bounded execution](docs/sql-support.md#memory-bounded-execution).
+
+## Benchmarks
+
+The benchmark suite runs the Rust engine against the C++ reference on the
+same generated data and validates results before comparing latency. It records
+raw samples, machine and toolchain metadata, and a self-contained interactive
+HTML report at `results/benchmark-report.html`. The runner prints the report
+location after each completed run.
+
+The comparison requires CMake, an LLVM Clang toolchain with C++26 support,
+Apache Arrow C++ and Parquet, and PyArrow 25.0.1. On macOS:
 
 ```bash
 brew install llvm cmake apache-arrow
 python3 -m venv .venv
 .venv/bin/pip install -r benchmarks/requirements.txt
-```
-
-Run a small cross-engine check:
-
-```bash
 DATASET_ROWS=20000 WARMUP=1 ITERATIONS=3 ./benchmark.sh
 ```
 
-This generates the dataset, builds and tests both engines, validates their
-results, and runs every enabled workload. Generated data, build products, and
-reports stay under ignored directories.
+The runner requires Rust 1.97.1 and targets Clang 22.1.8 in C++26 mode. It
+prints the actual compiler and standard library versions used for each run.
 
-The default benchmark uses one million events, three warmups, and twenty timed
+The default run uses one million events, three warmups, and twenty measured
 iterations:
 
 ```bash
 ./benchmark.sh
 ```
 
-Results are written to `results/` as JSON, CSV, environment metadata, and a
-plain-text summary. Raw nanosecond samples are retained in the JSON reports.
-
-## Development direction
-
-The [Dremel paper](https://research.google.com/pubs/archive/36632.pdf)
-describes querying nested column-striped data through a multi-level serving
-tree. This repository has a fixed-schema columnar engine, Parquet readers, and
-a small repetition/definition-level round-trip example. That example is not
-yet connected to SQL execution. The next milestones are generic nested Parquet
-scans, partial aggregation over partitions, a coordinator and leaf protocol,
-and fault-tolerant execution. Each needs independent correctness, resource,
-and scale tests before this can be called production-ready.
-
-## Benchmark configuration
-
-The runner is configured through environment variables:
-
-```bash
-DATASET_ROWS=5000000 \
-DATASET_SEED=12345 \
-BENCH_THREADS=8 \
-BATCH_SIZE=8192 \
-WARMUP=5 \
-ITERATIONS=30 \
-TIE_THRESHOLD_PCT=0 \
-LTO=1 \
-NATIVE=1 \
-./benchmark.sh
-```
-
-`EXTENDED`, `SQL_V1`, `OPTIMIZER`, `CONCURRENCY`, `STORAGE`,
-`MEMORY_BOUNDED`, `PARQUET`, `SPILL`, `RESULT_STREAMING`, `EXTERNAL_SORT`,
-`PARQUET_SORT`, and `PARQUET_CONCURRENCY`
-default to `1`.
-Set any of them to `0` to skip that suite. The storage suite verifies equal
-typed results and benchmarks full-file load plus in-memory execution for
-DREMCOL1, Arrow IPC, Parquet Snappy, and Parquet Zstd. On Linux,
-`BENCH_CPUSET=0-7` pins both servers through `taskset`.
-
-Every completed benchmark run writes a self-contained interactive report to
-`results/benchmark-report.html`, prints a clickable `file://` URL, and opens it
-in the default browser when the terminal is interactive. Set `REPORT_OPEN=0`
-to prevent automatic opening or `REPORT_OPEN=1` to request it explicitly. The
-report can also be regenerated from existing JSON results without rerunning the
-benchmarks:
+Common settings are `DATASET_ROWS`, `BENCH_THREADS`, `BATCH_SIZE`, `WARMUP`,
+`ITERATIONS`, `LTO`, and `NATIVE`. Set `REPORT_OPEN=0` to suppress automatic
+browser opening. Existing results can be rendered again without rerunning the
+engines:
 
 ```bash
 python3 benchmarks/scripts/generate_benchmark_report.py --results-dir results --open
 ```
 
-## Running an individual query
+Results from one machine describe these implementations on that machine, not
+Rust and C++ in general. Parsing and planning are tracked separately from the
+primary execution timer. The summary uses per-query median latency and a
+geometric mean of Rust/C++ ratios; query order alternates between engines.
+For a meaningful comparison, run both on the same controlled host rather than
+comparing measurements from unrelated CI machines.
+`benchmarks/Dockerfile` provides a Linux correctness environment, but Docker
+measurements should not be mixed with native macOS measurements.
 
-After a release build and dataset generation:
+## Development
+
+Run the Rust checks locally:
 
 ```bash
-./target/release/dremel query \
-  --data data/events.dremel --threads 4 --batch-size 4096 \
-  --sql "SELECT country, COUNT(*) AS count FROM events GROUP BY country"
+cargo fmt --check
+cargo test
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-The C++ reference is available for comparisons after running the benchmark
-build:
+CI runs these checks for pull requests and pushes to `main`. The cross-engine
+smoke benchmark is available through a manual GitHub Actions run. The C++
+reference can also be built and tested directly:
 
 ```bash
-./benchmarks/cpp/build/dremel-cpp query \
-  --data data/events.dremel --threads 4 --batch-size 4096 \
-  --sql "SELECT country, COUNT(*) AS count FROM events GROUP BY country" \
-  --explain
-```
-
-Use an interoperable file by changing `--data` in either command:
-
-```bash
---data data/events.arrow
---data data/events-snappy.parquet
---data data/events-zstd.parquet
-```
-
-Add `--direct-parquet` when using a Parquet file to defer decoding until query
-execution. The scan reads only referenced columns and skips row groups whose
-official Parquet min/max/null statistics cannot satisfy supported predicates:
-
-```bash
-./target/release/dremel query \
-  --data data/events-snappy.parquet --direct-parquet \
-  --sql "SELECT SUM(bytes) FROM events WHERE event_id <= 100000" --stats
-```
-
-Use `--streaming-parquet` instead to pass projected Parquet record batches
-directly into scans, aggregates, and eligible dimension joins. Inner and left
-joins from `events` to the `users.user_id` or `campaigns.campaign_id` primary
-key stream each fact batch through a cached dimension index. Global Top-K,
-`DISTINCT`, and grouped `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX` are merged across
-batches. `--batch-size` sets the maximum decoded batch size, and `--stats`
-reports the batch count, peak decoded batch bytes, and whether the query used
-the materialized fallback. Other join shapes, windows, CTEs,
-subqueries, `UNION`, and `HAVING` use that fallback.
-
-```bash
-./benchmarks/cpp/build/dremel-cpp query \
-  --data data/events-snappy.parquet --streaming-parquet --batch-size 4096 \
-  --sql "SELECT country, COUNT(*) FROM events GROUP BY country" --stats
-```
-
-`users` and `campaigns` are loaded from matching Arrow or Parquet files when a
-query uses those tables. The files are generated deterministically by official
-PyArrow and read through the official Rust and C++ Arrow/Parquet libraries.
-
-The long-lived `bench-server` accepts asynchronous submissions in direct or
-streaming Parquet mode. It applies the same admission queue, resource-group
-reservations, deadlines, and cancellation rules as native queries. Each
-admitted request executes with its own query workspace cap; decoded Parquet
-event tables or batches are bounded separately by `--memory-limit-mb`. The
-concurrent Parquet benchmark checks result hashes against synchronous controls
-in both modes.
-
-Use `--stats` for scan and execution counters. `--memory-limit-mb` limits the
-loaded or materialized table and each decoded streaming batch, while
-`--query-memory-limit-mb` places a hard cap on accounted query workspace. Hash
-aggregation, joins, distinct sets, windows, intermediate relations, scan
-selections, and result rows participate in the cap.
-Optimized `ORDER BY ... LIMIT` queries retain only `limit + offset` rows. A
-query that cannot stay inside the cap returns `RESOURCE_EXHAUSTED`; `0` keeps
-the query cap disabled. `--max-result-rows` provides a separate result
-cardinality limit. See
-[SQL support](docs/sql-support.md) for the implemented language surface.
-
-Add `--spill-dir` with a nonzero query memory limit to let eligible
-high-cardinality hash aggregations partition row references to temporary files.
-The current spill path supports grouped event queries with ordered, limited
-output, including `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX`. Query stats report
-peak accounted memory, partitions, files, bytes written/read, and passes. Each
-query uses a unique child directory and removes it after success, failure, or
-cancellation.
-
-```bash
-./target/release/dremel query \
-  --data data/events.dremel --query-memory-limit-mb 4 \
-  --spill-dir /tmp/dremel-spill \
-  --sql "SELECT event_id, COUNT(*) AS cnt FROM events GROUP BY event_id ORDER BY event_id DESC LIMIT 100" \
-  --stats
-```
-
-Add `--stream-results` to emit typed NDJSON as rows are produced instead of
-holding the complete result in memory. The bounded path supports a single
-`events` scan with scalar projection, filtering, `LIMIT`, and `OFFSET`. It can
-also consume official Arrow-backed Parquet record batches with
-`--streaming-parquet`. Query stats report emitted rows, bytes, batches, and
-peak accounted memory.
-
-Ordered native scans and `--streaming-parquet` scans can combine `--stream-results`, `--spill-dir`, and a
-nonzero query memory limit. The external merge sort builds sorted runs within
-the cap, uses bounded fan-in merge passes when needed, and heap-merges the
-final runs directly to typed NDJSON. It supports scalar
-projection and filtering, full `ORDER BY` direction and null placement,
-deterministic ties, `LIMIT`, and `OFFSET`. Spill stats report initial runs,
-temporary files, bytes written/read, and passes. Temporary workspaces are
-removed after success or failure.
-
-For Parquet, add `--streaming-parquet` and point `--data` at a `.parquet`
-file. Projected batches and selected row groups feed the same external sort
-used by native scans. `--memory-limit-mb` bounds each decoded batch; the query
-memory limit bounds sorted runs and merge buffers. Ordered streaming is not
-supported with `--direct-parquet`.
-
-```bash
-./benchmarks/cpp/build/dremel-cpp query \
-  --data data/events.dremel --query-memory-limit-mb 1 --stream-results \
-  --sql "SELECT event_id, country, score FROM events WHERE event_id <= 100000" \
-  --stats > result.ndjson
-```
-
-```bash
-./target/release/dremel query \
-  --data data/events.dremel --query-memory-limit-mb 2 \
-  --spill-dir /tmp/dremel-sort --stream-results \
-  --sql "SELECT event_id, campaign_id, score FROM events ORDER BY score DESC, event_id ASC" \
-  --stats > sorted.ndjson
-```
-
-Each output line is one JSON array containing typed scalar objects. Streaming
-can expose earlier rows before a later execution or output error, so consumers
-must treat a successful process exit as the completion signal.
-
-## How the comparison works
-
-Both engines load the same versioned binary column store and execute matching
-physical algorithms. Each query is prepared before its primary timer begins;
-parsing and planning are reported separately as end-to-end latency. Engine
-order alternates on every iteration, and only one timed query runs at a time.
-
-The headline comparison uses per-query median execution latency. Differences
-inside `TIE_THRESHOLD_PCT` are ties, and the workload summary is the geometric
-mean of the Rust/C++ ratios. Results are checked before they are counted:
-unordered rows are canonicalized, ordered rows remain in order, and floating
-point values use absolute and relative tolerances of `1e-9`.
-
-This controls the workload and engine design; it does not make the compilers,
-standard libraries, allocators, or language runtimes identical. A result from
-one machine describes these two implementations on that machine, not either
-language in general.
-
-## Tests
-
-```bash
-cargo fmt --manifest-path Cargo.toml --check
-cargo test --manifest-path Cargo.toml
-cargo clippy --manifest-path Cargo.toml --all-targets --all-features -- -D warnings
-
 cmake -S benchmarks/cpp -B benchmarks/cpp/build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_COMPILER="$(brew --prefix llvm)/bin/clang++" \
   -DCMAKE_PREFIX_PATH="$(brew --prefix apache-arrow)" \
   -DDREMEL_CXX_STANDARD=26
 cmake --build benchmarks/cpp/build -j
 ctest --test-dir benchmarks/cpp/build --output-on-failure
-
-python3 benchmarks/scripts/differential_test.py
-python3 benchmarks/scripts/test_resource_limits.py
-python3 benchmarks/scripts/test_memory_limits.py
-python3 benchmarks/scripts/test_streaming_results.py
-python3 benchmarks/scripts/test_external_sort.py
-python3 benchmarks/scripts/test_ordered_parquet_streaming.py
-python3 benchmarks/scripts/test_async_parquet.py
 ```
 
-CI runs Rust formatting, tests, and linting for pull requests and pushes to
-`main`. The cross-engine smoke benchmark runs only when the CI workflow is
-started manually in GitHub Actions. Full performance measurements remain
-local, since shared CI runners are not stable benchmarking environments.
-`benchmarks/Dockerfile` provides a Linux correctness environment. Do not mix
-Docker measurements with native host measurements. Build that image with
-`docker build -f benchmarks/Dockerfile -t dremel-bench .`.
+The reference CLI is `benchmarks/cpp/build/dremel-cpp`; it accepts the same
+`query --data ... --sql ...` shape as the Rust CLI.
 
-The default Arrow and Parquet path remains an eager full-file control. Direct
-Parquet mode materializes only projected columns and selected row groups.
-Streaming Parquet keeps event scans, aggregates, and primary-key dimension
-joins batch bounded while retaining the same projection and pruning rules.
-Page-index pruning, streaming right/full/non-key joins, distributed exchange,
-durable spill recovery, transactions, and database wire protocols remain
-outside the current scope.
+## Project status
 
-The main benchmark also runs `benchmarks/workloads/memory/manifest.json` with a 256 MiB
-query workspace cap. Set `MEMORY_BOUNDED=0` to skip that suite or change the
-cap with `QUERY_MEMORY_LIMIT_MB`.
-The spill suite uses a 4 MiB cap by default. Set `SPILL=0` to skip it or change
-the cap with `SPILL_MEMORY_LIMIT_MB`. The result-streaming suite uses a 1 MiB
-cap. Set `RESULT_STREAMING=0` to skip it or change the cap with
-`RESULT_STREAM_MEMORY_LIMIT_MB`.
-The external-sort suite uses a 2 MiB cap. Set `EXTERNAL_SORT=0` to skip it or
-change the cap with `SORT_MEMORY_LIMIT_MB`.
-The ordered Parquet sort suite uses the same query cap plus a 4 MiB decoded
-batch cap by default. Set `PARQUET_SORT=0` to skip it or adjust
-`PARQUET_SORT_DECODED_MEMORY_LIMIT_MB`. Both suites appear in the HTML
-report with separate timing, spill, and Parquet scan metrics.
-The concurrent Parquet suite runs direct and streaming modes over the same
-30-request mix. Set `PARQUET_CONCURRENCY=0` to skip it or adjust the decoded
-table/batch cap with `PARQUET_CONCURRENCY_MEMORY_LIMIT_MB`.
+This is a single-node, fixed-schema research engine. It does not yet implement
+the paper's multi-level serving tree or generic nested-field SQL execution.
+There is a repetition/definition-level round-trip example, but it is not
+connected to the query engine. Distributed storage and exchange, fault
+tolerance, transactions, database wire protocols, and durable spill recovery
+are also outside the current scope.
+
+The next architectural steps are generic nested Parquet scans, partitioned
+partial aggregation, and a coordinator-to-leaf execution protocol. Each step
+needs correctness and resource testing before a production-readiness claim
+would be justified.
