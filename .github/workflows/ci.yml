@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   rust:
@@ -20,6 +22,7 @@ jobs:
           cargo clippy --all-targets --all-features -- -D warnings
 
   benchmarks:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4

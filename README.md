@@ -303,10 +303,12 @@ python3 benchmarks/scripts/test_ordered_parquet_streaming.py
 python3 benchmarks/scripts/test_async_parquet.py
 ```
 
-CI checks the Rust engine independently, then runs the cross-engine benchmark
-suite on macOS with the pinned toolchains. `benchmarks/Dockerfile` provides a
-Linux correctness environment; do not mix Docker measurements with native
-host measurements. Build that image with
+CI runs Rust formatting, tests, and linting for pull requests and pushes to
+`main`. The cross-engine smoke benchmark runs only when the CI workflow is
+started manually in GitHub Actions. Full performance measurements remain
+local, since shared CI runners are not stable benchmarking environments.
+`benchmarks/Dockerfile` provides a Linux correctness environment. Do not mix
+Docker measurements with native host measurements. Build that image with
 `docker build -f benchmarks/Dockerfile -t dremel-bench .`.
 
 The default Arrow and Parquet path remains an eager full-file control. Direct
