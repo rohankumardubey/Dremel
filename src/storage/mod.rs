@@ -7,9 +7,11 @@ use std::sync::Arc;
 
 mod columnar;
 mod dimension;
+mod event_columnar;
 mod interoperable;
 pub use columnar::ColumnarTable;
 pub(crate) use dimension::DimensionTable;
+use event_columnar::EventColumnar;
 pub(crate) use interoperable::ParquetScanMetrics;
 
 #[derive(Clone, Default)]
@@ -78,6 +80,7 @@ pub(crate) fn read_dictionary<R: Read>(
     Ok((d, read_u32s(r, rows)?))
 }
 pub struct Table {
+    columnar: Option<EventColumnar>,
     pub(crate) logical_rows: usize,
     pub(crate) event_id: Vec<i64>,
     pub(crate) user_id: Vec<i64>,
@@ -691,6 +694,7 @@ impl Table {
     }
     pub(crate) fn empty() -> Self {
         Self {
+            columnar: None,
             logical_rows: 0,
             event_id: vec![],
             user_id: vec![],
@@ -708,6 +712,24 @@ impl Table {
             campaign: vec![],
             campaign_def: vec![],
         }
+    }
+    pub(crate) fn from_columnar(data: ColumnarTable) -> Result<Self, String> {
+        let columnar = EventColumnar::new(data)?;
+        let mut table = Self::empty();
+        table.logical_rows = columnar.row_count();
+        for row in 0..table.logical_rows {
+            table
+                .country
+                .push(table.country_dict.insert(columnar.string("country", row)));
+            table
+                .device
+                .push(table.device_dict.insert(columnar.string("device", row)));
+            table
+                .event_type
+                .push(table.event_dict.insert(columnar.string("event_type", row)));
+        }
+        table.columnar = Some(columnar);
+        Ok(table)
     }
     pub(crate) fn load_binary(path: &str) -> Result<Self, String> {
         let mut f = File::open(path).map_err(|e| e.to_string())?;
@@ -777,14 +799,45 @@ impl Table {
             self.event_id.len()
         }
     }
+    pub(crate) fn campaign_null_count(&self) -> usize {
+        self.columnar.as_ref().map_or_else(
+            || {
+                self.campaign_def
+                    .iter()
+                    .filter(|&&level| level == 0)
+                    .count()
+            },
+            EventColumnar::campaign_null_count,
+        )
+    }
+    pub(crate) fn event_id_bounds(&self) -> (i64, i64) {
+        if self.len() == 0 {
+            (0, 0)
+        } else if let Some(columnar) = &self.columnar {
+            let first = columnar.scalar("event_id", 0);
+            let last = columnar.scalar("event_id", self.len() - 1);
+            match (first, last) {
+                (Scalar::Int(first), Scalar::Int(last)) => (first, last),
+                _ => (0, 0),
+            }
+        } else {
+            (
+                *self.event_id.first().unwrap_or(&0),
+                *self.event_id.last().unwrap_or(&0),
+            )
+        }
+    }
     pub(crate) fn approximate_bytes(&self) -> usize {
-        (self.event_id.len()
-            + self.user_id.len()
-            + self.timestamp.len()
-            + self.duration.len()
-            + self.bytes.len()
-            + self.campaign.len())
-            * 8
+        self.columnar
+            .as_ref()
+            .map_or(0, EventColumnar::approximate_bytes)
+            + (self.event_id.len()
+                + self.user_id.len()
+                + self.timestamp.len()
+                + self.duration.len()
+                + self.bytes.len()
+                + self.campaign.len())
+                * 8
             + (self.country.len() + self.device.len() + self.event_type.len()) * 4
             + self.score.len() * 8
             + self.success.len()
@@ -820,6 +873,9 @@ impl Table {
         }
     }
     pub(crate) fn scalar(&self, c: &str, i: usize) -> Scalar {
+        if let Some(columnar) = &self.columnar {
+            return columnar.scalar(c.rsplit('.').next().unwrap_or(c), i);
+        }
         match c.rsplit('.').next().unwrap_or(c) {
             "event_id" => Scalar::Int(self.event_id[i]),
             "user_id" => Scalar::Int(self.user_id[i]),
@@ -846,10 +902,11 @@ impl Table {
             "country" => self.country[i] as u64,
             "device" => self.device[i] as u64,
             "event_type" => self.event_type[i] as u64,
-            "success" => self.success[i] as u64,
-            "campaign_id" => self.campaign[i] as u64,
+            "success" if self.columnar.is_none() => self.success[i] as u64,
+            "campaign_id" if self.columnar.is_none() => self.campaign[i] as u64,
             _ => match self.scalar(c, i) {
                 Scalar::Int(v) => v as u64,
+                Scalar::Bool(v) => u64::from(v),
                 _ => 0,
             },
         }

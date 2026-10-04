@@ -116,9 +116,7 @@ pub(crate) fn relation_group_key(
             "country" => ScalarKey::Dict(catalog.events.country[index]),
             "device" => ScalarKey::Dict(catalog.events.device[index]),
             "event_type" => ScalarKey::Dict(catalog.events.event_type[index]),
-            "success" => ScalarKey::Bool(catalog.events.success[index] != 0),
-            "campaign_id" if catalog.events.campaign_def[index] == 0 => ScalarKey::Null,
-            "campaign_id" => ScalarKey::Int(catalog.events.campaign[index]),
+            "success" | "campaign_id" => scalar_group_key(catalog.events.scalar(column, index)),
             _ => scalar_group_key(relation_scalar(catalog, row, table, column)),
         };
     }

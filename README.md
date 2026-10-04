@@ -25,10 +25,10 @@ and it is not production-ready.
 See [SQL support](docs/sql-support.md) for exact syntax, execution-mode
 restrictions, and unsupported features.
 
-Arrow IPC and Parquet dimension tables retain their typed columns and any
-additional fields in the storage layer. Current SQL binding still exposes the
-fixed `events`, `users`, and `campaigns` columns, and the event execution path
-still uses its specialized layout.
+Eager Arrow IPC and Parquet reads retain typed columns and additional fields
+for all three built-in tables. Current SQL binding still exposes only the
+fixed `events`, `users`, and `campaigns` columns. Native DREMCOL1 and direct
+Parquet scans still use specialized event layouts.
 
 ## Quick start
 
@@ -174,9 +174,10 @@ The reference CLI is `benchmarks/cpp/build/dremel-cpp`; it accepts the same
 
 This is a single-node, fixed-schema research engine. It does not yet implement
 the paper's multi-level serving tree or generic nested-field SQL execution.
-The Rust storage boundary can now read arbitrary Arrow IPC and Parquet schemas
-through `ColumnarTable`, but SQL still converts the three built-in tables to
-fixed execution layouts. The generic-schema migration is in progress.
+The Rust storage boundary can read arbitrary Arrow IPC and Parquet schemas
+through `ColumnarTable`. Eager Arrow and Parquet queries use typed columnar
+storage, while native and direct Parquet event paths remain specialized. The
+generic-schema migration is in progress.
 There is a repetition/definition-level round-trip example, but it is not
 connected to the query engine. Distributed storage and exchange, fault
 tolerance, transactions, database wire protocols, and durable spill recovery
