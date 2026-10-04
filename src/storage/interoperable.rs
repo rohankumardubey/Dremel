@@ -1,10 +1,8 @@
-use super::{CampaignsTable, ColumnarTable, Table, UsersTable};
+use super::{ColumnarTable, DimensionTable, Table};
 use crate::execution::scalar::cmp;
 use crate::sql::{Expr, Query};
 use crate::types::{Scalar, execution_cancelled};
-use arrow::array::{
-    Array, ArrayRef, BooleanArray, Decimal128Array, Float64Array, Int64Array, StringArray,
-};
+use arrow::array::{Array, ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray};
 use arrow::compute::cast;
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
@@ -668,86 +666,10 @@ fn downcast<'a, T: 'static>(array: &'a Arc<dyn Array>, name: &str) -> Result<&'a
         .ok_or_else(|| format!("unsupported {name} array type {}", array.data_type()))
 }
 
-pub(super) fn load_users(path: &Path) -> Result<UsersTable, String> {
-    let mut users = UsersTable::default();
-    for batch in read_batches(path)? {
-        let user_id = as_int64(&batch, "user_id")?;
-        let segment = as_utf8(&batch, "segment")?;
-        let signup_date = as_utf8(&batch, "signup_date")?;
-        let region = as_utf8(&batch, "region")?;
-        let active = as_boolean(&batch, "active")?;
-        let lifetime = column(&batch, "lifetime_value")?;
-        let user_id = downcast::<Int64Array>(&user_id, "user_id")?;
-        let segment = downcast::<StringArray>(&segment, "segment")?;
-        let signup_date = downcast::<StringArray>(&signup_date, "signup_date")?;
-        let region = downcast::<StringArray>(&region, "region")?;
-        let active = downcast::<BooleanArray>(&active, "active")?;
-        let lifetime = downcast::<Decimal128Array>(&lifetime, "lifetime_value")?;
-        for row_in_batch in 0..batch.num_rows() {
-            for (name, array) in [
-                ("user_id", user_id as &dyn Array),
-                ("segment", segment),
-                ("signup_date", signup_date),
-                ("lifetime_value", lifetime),
-                ("region", region),
-                ("active", active),
-            ] {
-                if array.is_null(row_in_batch) {
-                    return Err(format!("required column {name} contains null"));
-                }
-            }
-            let row = users.user_id.len();
-            let id = user_id.value(row_in_batch);
-            users.user_id.push(id);
-            users.segment.push(segment.value(row_in_batch).into());
-            users
-                .signup_date
-                .push(signup_date.value(row_in_batch).into());
-            users.lifetime_value.push(
-                i64::try_from(lifetime.value(row_in_batch))
-                    .map_err(|_| "lifetime_value exceeds engine decimal range")?,
-            );
-            users.region.push(region.value(row_in_batch).into());
-            users.active.push(active.value(row_in_batch));
-            users.index.entry(id).or_default().push(row);
-        }
-    }
-    Ok(users)
+pub(super) fn load_users(path: &Path) -> Result<DimensionTable, String> {
+    DimensionTable::users(ColumnarTable::read(path)?)
 }
 
-pub(super) fn load_campaigns(path: &Path) -> Result<CampaignsTable, String> {
-    let mut campaigns = CampaignsTable::default();
-    for batch in read_batches(path)? {
-        let campaign_id = as_int64(&batch, "campaign_id")?;
-        let campaign_name = as_utf8(&batch, "campaign_name")?;
-        let budget = column(&batch, "budget")?;
-        let start_date = as_utf8(&batch, "start_date")?;
-        let end_date = as_utf8(&batch, "end_date")?;
-        let channel = as_utf8(&batch, "channel")?;
-        let campaign_id = downcast::<Int64Array>(&campaign_id, "campaign_id")?;
-        let campaign_name = downcast::<StringArray>(&campaign_name, "campaign_name")?;
-        let budget = downcast::<Decimal128Array>(&budget, "budget")?;
-        let start_date = downcast::<StringArray>(&start_date, "start_date")?;
-        let end_date = downcast::<StringArray>(&end_date, "end_date")?;
-        let channel = downcast::<StringArray>(&channel, "channel")?;
-        for row_in_batch in 0..batch.num_rows() {
-            let row = campaigns.campaign_id.len();
-            let id = campaign_id.value(row_in_batch);
-            campaigns.campaign_id.push(id);
-            campaigns
-                .campaign_name
-                .push(campaign_name.value(row_in_batch).into());
-            campaigns.budget.push(
-                i64::try_from(budget.value(row_in_batch))
-                    .map_err(|_| "budget exceeds engine decimal range")?,
-            );
-            campaigns
-                .start_date
-                .push(start_date.value(row_in_batch).into());
-            campaigns.end_date.push(end_date.value(row_in_batch).into());
-            campaigns.channel.push(channel.value(row_in_batch).into());
-            campaigns.index.entry(id).or_default().push(row);
-        }
-    }
-    Ok(campaigns)
+pub(super) fn load_campaigns(path: &Path) -> Result<DimensionTable, String> {
+    DimensionTable::campaigns(ColumnarTable::read(path)?)
 }

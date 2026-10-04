@@ -711,14 +711,7 @@ pub(crate) fn simple_campaign_lookup(
                 .campaigns
                 .index
                 .get(&value)
-                .and_then(|indices| indices.first().copied())
-                .or_else(|| {
-                    catalog
-                        .campaigns
-                        .campaign_id
-                        .iter()
-                        .position(|candidate| *candidate == value)
-                }),
+                .and_then(|indices| indices.first().copied()),
         ),
         Scalar::Null => Some(None),
         _ => None,
@@ -744,18 +737,18 @@ pub(crate) fn simple_campaign_max_budget(
     }
     if query.filter.is_none() {
         return Some(
-            catalog
-                .campaigns
-                .budget
-                .iter()
-                .copied()
+            (0..catalog.campaigns.row_count())
+                .filter_map(|index| match catalog.campaigns.scalar("budget", index) {
+                    Scalar::Decimal(value) => Some(value),
+                    _ => None,
+                })
                 .max()
                 .map_or(Scalar::Null, Scalar::Decimal),
         );
     }
     simple_campaign_lookup(query, catalog, row, outer_bindings).map(|index| {
         index.map_or(Scalar::Null, |index| {
-            Scalar::Decimal(catalog.campaigns.budget[index])
+            catalog.campaigns.scalar("budget", index)
         })
     })
 }
@@ -774,14 +767,7 @@ pub(crate) fn simple_campaign_id_membership(
         return None;
     }
     match value {
-        Scalar::Int(value) => Some(
-            catalog.campaigns.index.contains_key(value)
-                || catalog
-                    .campaigns
-                    .campaign_id
-                    .iter()
-                    .any(|candidate| candidate == value),
-        ),
+        Scalar::Int(value) => Some(catalog.campaigns.index.contains_key(value)),
         _ => None,
     }
 }

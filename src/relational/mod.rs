@@ -18,8 +18,8 @@ pub(crate) fn base_relation_rows_filtered(
 ) -> Vec<RelRow> {
     let (rows, relation) = match table {
         "events" => (catalog.events.len(), 0),
-        "users" => (catalog.users.user_id.len(), 1),
-        "campaigns" => (catalog.campaigns.campaign_id.len(), 2),
+        "users" => (catalog.users.row_count(), 1),
+        "campaigns" => (catalog.campaigns.row_count(), 2),
         _ => return Vec::new(),
     };
     let table_filters: Vec<_> = filters
@@ -171,11 +171,10 @@ pub(crate) fn apply_join(
         && let Ok((right_table, right_column)) = resolve_column(right_column, bindings)
         && ((right_table == "users"
             && right_column == "user_id"
-            && (catalog.users.user_id.is_empty() || !catalog.users.index.is_empty()))
+            && (catalog.users.row_count() == 0 || !catalog.users.index.is_empty()))
             || (right_table == "campaigns"
                 && right_column == "campaign_id"
-                && (catalog.campaigns.campaign_id.is_empty()
-                    || !catalog.campaigns.index.is_empty())))
+                && (catalog.campaigns.row_count() == 0 || !catalog.campaigns.index.is_empty())))
     {
         let right_filters: Vec<_> = filters
             .iter()

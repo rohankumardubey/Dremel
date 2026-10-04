@@ -6,8 +6,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 mod columnar;
+mod dimension;
 mod interoperable;
 pub use columnar::ColumnarTable;
+pub(crate) use dimension::DimensionTable;
 pub(crate) use interoperable::ParquetScanMetrics;
 
 #[derive(Clone, Default)]
@@ -94,32 +96,10 @@ pub struct Table {
     pub(crate) campaign_def: Vec<u8>,
 }
 
-#[derive(Default)]
-pub(crate) struct UsersTable {
-    pub(crate) user_id: Vec<i64>,
-    pub(crate) segment: Vec<String>,
-    pub(crate) signup_date: Vec<String>,
-    pub(crate) lifetime_value: Vec<i64>,
-    pub(crate) region: Vec<String>,
-    pub(crate) active: Vec<bool>,
-    pub(crate) index: std::collections::HashMap<i64, Vec<usize>>,
-}
-
-#[derive(Default)]
-pub(crate) struct CampaignsTable {
-    pub(crate) campaign_id: Vec<i64>,
-    pub(crate) campaign_name: Vec<String>,
-    pub(crate) budget: Vec<i64>,
-    pub(crate) start_date: Vec<String>,
-    pub(crate) end_date: Vec<String>,
-    pub(crate) channel: Vec<String>,
-    pub(crate) index: std::collections::HashMap<i64, Vec<usize>>,
-}
-
 pub(crate) struct Catalog {
     pub(crate) events: Arc<Table>,
-    pub(crate) users: UsersTable,
-    pub(crate) campaigns: CampaignsTable,
+    pub(crate) users: DimensionTable,
+    pub(crate) campaigns: DimensionTable,
 }
 
 pub(crate) fn parse_decimal_cents(value: &str) -> Result<i64, String> {
@@ -167,7 +147,7 @@ impl Catalog {
         }
         let users_path = directory.join("users.csv");
         let campaigns_path = directory.join("campaigns.csv");
-        let mut users = UsersTable::default();
+        let mut users = Vec::new();
         let user_file = File::open(&users_path)
             .map_err(|error| format!("cannot open {}: {error}", users_path.display()))?;
         for (line_number, line) in BufReader::new(user_file).lines().enumerate() {
@@ -179,19 +159,17 @@ impl Catalog {
             if fields.len() != 6 {
                 return Err(format!("bad users row {}", line_number + 1));
             }
-            let row = users.user_id.len();
             let id = fields[0].parse().map_err(|_| "bad users.user_id")?;
-            users.user_id.push(id);
-            users.segment.push(fields[1].into());
-            users.signup_date.push(fields[2].into());
-            users
-                .lifetime_value
-                .push(parse_decimal_cents(fields[3]).map_err(|_| "bad users.lifetime_value")?);
-            users.region.push(fields[4].into());
-            users.active.push(fields[5] == "true");
-            users.index.entry(id).or_default().push(row);
+            users.push((
+                id,
+                fields[1].into(),
+                fields[2].into(),
+                parse_decimal_cents(fields[3]).map_err(|_| "bad users.lifetime_value")?,
+                fields[4].into(),
+                fields[5] == "true",
+            ));
         }
-        let mut campaigns = CampaignsTable::default();
+        let mut campaigns = Vec::new();
         let campaign_file = File::open(&campaigns_path)
             .map_err(|error| format!("cannot open {}: {error}", campaigns_path.display()))?;
         for (line_number, line) in BufReader::new(campaign_file).lines().enumerate() {
@@ -203,22 +181,20 @@ impl Catalog {
             if fields.len() != 6 {
                 return Err(format!("bad campaigns row {}", line_number + 1));
             }
-            let row = campaigns.campaign_id.len();
             let id = fields[0].parse().map_err(|_| "bad campaigns.campaign_id")?;
-            campaigns.campaign_id.push(id);
-            campaigns.campaign_name.push(fields[1].into());
-            campaigns
-                .budget
-                .push(parse_decimal_cents(fields[2]).map_err(|_| "bad campaigns.budget")?);
-            campaigns.start_date.push(fields[3].into());
-            campaigns.end_date.push(fields[4].into());
-            campaigns.channel.push(fields[5].into());
-            campaigns.index.entry(id).or_default().push(row);
+            campaigns.push((
+                id,
+                fields[1].into(),
+                parse_decimal_cents(fields[2]).map_err(|_| "bad campaigns.budget")?,
+                fields[3].into(),
+                fields[4].into(),
+                fields[5].into(),
+            ));
         }
         Ok(Self {
             events,
-            users,
-            campaigns,
+            users: DimensionTable::from_users_rows(users)?,
+            campaigns: DimensionTable::from_campaign_rows(campaigns)?,
         })
     }
 }
@@ -665,42 +641,12 @@ pub(crate) fn relation_scalar(catalog: &Catalog, row: RelRow, table: &str, colum
         ("events", column) => row
             .event
             .map_or(Scalar::Null, |index| catalog.events.scalar(column, index)),
-        ("users", "user_id") => row
+        ("users", column) => row
             .user
-            .map_or(Scalar::Null, |i| Scalar::Int(catalog.users.user_id[i])),
-        ("users", "segment") => row.user.map_or(Scalar::Null, |i| {
-            Scalar::Str(catalog.users.segment[i].clone())
-        }),
-        ("users", "signup_date") => row.user.map_or(Scalar::Null, |i| {
-            Scalar::Str(catalog.users.signup_date[i].clone())
-        }),
-        ("users", "lifetime_value") => row.user.map_or(Scalar::Null, |i| {
-            Scalar::Decimal(catalog.users.lifetime_value[i])
-        }),
-        ("users", "region") => row.user.map_or(Scalar::Null, |i| {
-            Scalar::Str(catalog.users.region[i].clone())
-        }),
-        ("users", "active") => row
-            .user
-            .map_or(Scalar::Null, |i| Scalar::Bool(catalog.users.active[i])),
-        ("campaigns", "campaign_id") => row.campaign.map_or(Scalar::Null, |i| {
-            Scalar::Int(catalog.campaigns.campaign_id[i])
-        }),
-        ("campaigns", "campaign_name") => row.campaign.map_or(Scalar::Null, |i| {
-            Scalar::Str(catalog.campaigns.campaign_name[i].clone())
-        }),
-        ("campaigns", "budget") => row.campaign.map_or(Scalar::Null, |i| {
-            Scalar::Decimal(catalog.campaigns.budget[i])
-        }),
-        ("campaigns", "start_date") => row.campaign.map_or(Scalar::Null, |i| {
-            Scalar::Str(catalog.campaigns.start_date[i].clone())
-        }),
-        ("campaigns", "end_date") => row.campaign.map_or(Scalar::Null, |i| {
-            Scalar::Str(catalog.campaigns.end_date[i].clone())
-        }),
-        ("campaigns", "channel") => row.campaign.map_or(Scalar::Null, |i| {
-            Scalar::Str(catalog.campaigns.channel[i].clone())
-        }),
+            .map_or(Scalar::Null, |i| catalog.users.scalar(column, i)),
+        ("campaigns", column) => row
+            .campaign
+            .map_or(Scalar::Null, |i| catalog.campaigns.scalar(column, i)),
         _ => Scalar::Null,
     }
 }
