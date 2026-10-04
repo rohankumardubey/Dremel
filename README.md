@@ -1,19 +1,22 @@
-# Dremel Bench
+# Dremel
 
-Two small columnar SQL engines, one in Rust and one in C++, built to answer the
-same queries over equivalent data. The repository is a practical test bed for
-query execution, optimization, and concurrent workload scheduling rather than
-a general-purpose database.
+A Rust columnar query engine under active development. It currently runs SQL
+against the included `events`, `users`, and `campaigns` schema. The C++ engine
+is retained under `benchmarks/` as a correctness and performance reference,
+not as a second product implementation.
 
 The design borrows the columnar layout and nested-record ideas described in the
 [Dremel paper](https://research.google/pubs/dremel-interactive-analysis-of-web-scale-datasets-2/).
 It is an independent implementation and is not Google Dremel or BigQuery.
+It is not production-ready yet. The paper's multi-level serving tree, generic
+nested-field execution, and distributed storage are not implemented.
 
 ## What is included
 
 | Area | Implementation |
 | --- | --- |
-| Engines | Rust 1.97.1 (Rust 2024) and LLVM Clang 22.1.8 (C++26) |
+| Main engine | Rust 1.97.1 (Rust 2024) |
+| Benchmark reference | LLVM Clang 22.1.8 (C++26) |
 | Storage | DREMCOL1, Arrow IPC, and Apache Parquet projection with row-group pruning |
 | Execution | Bounded Parquet and result streaming, concurrent Parquet queries, spillable aggregation and external sort, batched scans, joins and windows |
 | Optimizer | Scan filters, transitive predicates, pruning, contradiction elimination, selectivity-aware join ordering and Top-K |
@@ -26,24 +29,39 @@ release year.
 
 ## Quick start
 
-Requirements:
+To build the Rust engine, install Rust 1.97.1 with `rustfmt` and `clippy`, then
+run:
 
-- Python 3.11 or newer
-- Rust 1.97.1 with `rustfmt` and `clippy`
+```bash
+cargo build --release
+```
+
+To generate a small sample and execute a query, also install Python 3.11 or
+newer:
+
+```bash
+python3 benchmarks/scripts/generate_data.py --rows 20000
+python3 benchmarks/scripts/build_column_store.py
+./target/release/dremel query --data data/events.dremel \
+  --sql "SELECT country, COUNT(*) FROM events GROUP BY country"
+```
+
+The full cross-engine benchmark additionally requires:
+
 - CMake 3.20 or newer
 - LLVM Clang 22 with C++26 support
 - Apache Arrow C++ and Parquet 25.0.1
-- PyArrow 25.0.1 from `requirements.txt`
+- PyArrow 25.0.1 from `benchmarks/requirements.txt`
 
 On macOS, install the native dependencies and Python package with:
 
 ```bash
 brew install llvm cmake apache-arrow
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r benchmarks/requirements.txt
 ```
 
-Run a small end-to-end check:
+Run a small cross-engine check:
 
 ```bash
 DATASET_ROWS=20000 WARMUP=1 ITERATIONS=3 ./benchmark.sh
@@ -62,6 +80,17 @@ iterations:
 
 Results are written to `results/` as JSON, CSV, environment metadata, and a
 plain-text summary. Raw nanosecond samples are retained in the JSON reports.
+
+## Development direction
+
+The [Dremel paper](https://research.google.com/pubs/archive/36632.pdf)
+describes querying nested column-striped data through a multi-level serving
+tree. This repository has a fixed-schema columnar engine, Parquet readers, and
+a small repetition/definition-level round-trip example. That example is not
+yet connected to SQL execution. The next milestones are generic nested Parquet
+scans, partial aggregation over partitions, a coordinator and leaf protocol,
+and fault-tolerant execution. Each needs independent correctness, resource,
+and scale tests before this can be called production-ready.
 
 ## Benchmark configuration
 
@@ -97,7 +126,7 @@ report can also be regenerated from existing JSON results without rerunning the
 benchmarks:
 
 ```bash
-python3 scripts/generate_benchmark_report.py --results-dir results --open
+python3 benchmarks/scripts/generate_benchmark_report.py --results-dir results --open
 ```
 
 ## Running an individual query
@@ -105,11 +134,16 @@ python3 scripts/generate_benchmark_report.py --results-dir results --open
 After a release build and dataset generation:
 
 ```bash
-./dremel-rs/target/release/dremel-rs query \
+./target/release/dremel query \
   --data data/events.dremel --threads 4 --batch-size 4096 \
   --sql "SELECT country, COUNT(*) AS count FROM events GROUP BY country"
+```
 
-./dremel-cpp/build/dremel-cpp query \
+The C++ reference is available for comparisons after running the benchmark
+build:
+
+```bash
+./benchmarks/cpp/build/dremel-cpp query \
   --data data/events.dremel --threads 4 --batch-size 4096 \
   --sql "SELECT country, COUNT(*) AS count FROM events GROUP BY country" \
   --explain
@@ -128,7 +162,7 @@ execution. The scan reads only referenced columns and skips row groups whose
 official Parquet min/max/null statistics cannot satisfy supported predicates:
 
 ```bash
-./dremel-rs/target/release/dremel-rs query \
+./target/release/dremel query \
   --data data/events-snappy.parquet --direct-parquet \
   --sql "SELECT SUM(bytes) FROM events WHERE event_id <= 100000" --stats
 ```
@@ -144,7 +178,7 @@ the materialized fallback. Other join shapes, windows, CTEs,
 subqueries, `UNION`, and `HAVING` use that fallback.
 
 ```bash
-./dremel-cpp/build/dremel-cpp query \
+./benchmarks/cpp/build/dremel-cpp query \
   --data data/events-snappy.parquet --streaming-parquet --batch-size 4096 \
   --sql "SELECT country, COUNT(*) FROM events GROUP BY country" --stats
 ```
@@ -181,7 +215,7 @@ query uses a unique child directory and removes it after success, failure, or
 cancellation.
 
 ```bash
-./dremel-rs/target/release/dremel-rs query \
+./target/release/dremel query \
   --data data/events.dremel --query-memory-limit-mb 4 \
   --spill-dir /tmp/dremel-spill \
   --sql "SELECT event_id, COUNT(*) AS cnt FROM events GROUP BY event_id ORDER BY event_id DESC LIMIT 100" \
@@ -211,14 +245,14 @@ memory limit bounds sorted runs and merge buffers. Ordered streaming is not
 supported with `--direct-parquet`.
 
 ```bash
-./dremel-cpp/build/dremel-cpp query \
+./benchmarks/cpp/build/dremel-cpp query \
   --data data/events.dremel --query-memory-limit-mb 1 --stream-results \
   --sql "SELECT event_id, country, score FROM events WHERE event_id <= 100000" \
   --stats > result.ndjson
 ```
 
 ```bash
-./dremel-rs/target/release/dremel-rs query \
+./target/release/dremel query \
   --data data/events.dremel --query-memory-limit-mb 2 \
   --spill-dir /tmp/dremel-sort --stream-results \
   --sql "SELECT event_id, campaign_id, score FROM events ORDER BY score DESC, event_id ASC" \
@@ -250,28 +284,30 @@ language in general.
 ## Tests
 
 ```bash
-cargo fmt --manifest-path dremel-rs/Cargo.toml --check
-cargo test --manifest-path dremel-rs/Cargo.toml
-cargo clippy --manifest-path dremel-rs/Cargo.toml --all-targets --all-features -- -D warnings
+cargo fmt --manifest-path Cargo.toml --check
+cargo test --manifest-path Cargo.toml
+cargo clippy --manifest-path Cargo.toml --all-targets --all-features -- -D warnings
 
-cmake -S dremel-cpp -B dremel-cpp/build -DCMAKE_BUILD_TYPE=Release \
+cmake -S benchmarks/cpp -B benchmarks/cpp/build -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH="$(brew --prefix apache-arrow)" \
   -DDREMEL_CXX_STANDARD=26
-cmake --build dremel-cpp/build -j
-ctest --test-dir dremel-cpp/build --output-on-failure
+cmake --build benchmarks/cpp/build -j
+ctest --test-dir benchmarks/cpp/build --output-on-failure
 
-python3 scripts/differential_test.py
-python3 scripts/test_resource_limits.py
-python3 scripts/test_memory_limits.py
-python3 scripts/test_streaming_results.py
-python3 scripts/test_external_sort.py
-python3 scripts/test_ordered_parquet_streaming.py
-python3 scripts/test_async_parquet.py
+python3 benchmarks/scripts/differential_test.py
+python3 benchmarks/scripts/test_resource_limits.py
+python3 benchmarks/scripts/test_memory_limits.py
+python3 benchmarks/scripts/test_streaming_results.py
+python3 benchmarks/scripts/test_external_sort.py
+python3 benchmarks/scripts/test_ordered_parquet_streaming.py
+python3 benchmarks/scripts/test_async_parquet.py
 ```
 
-CI runs the same checks on macOS with the pinned toolchains. The `Dockerfile`
-provides a Linux correctness environment; do not mix Docker measurements with
-native host measurements.
+CI checks the Rust engine independently, then runs the cross-engine benchmark
+suite on macOS with the pinned toolchains. `benchmarks/Dockerfile` provides a
+Linux correctness environment; do not mix Docker measurements with native
+host measurements. Build that image with
+`docker build -f benchmarks/Dockerfile -t dremel-bench .`.
 
 The default Arrow and Parquet path remains an eager full-file control. Direct
 Parquet mode materializes only projected columns and selected row groups.
@@ -281,7 +317,7 @@ Page-index pruning, streaming right/full/non-key joins, distributed exchange,
 durable spill recovery, transactions, and database wire protocols remain
 outside the current scope.
 
-The main benchmark also runs `benchmark/memory/manifest.json` with a 256 MiB
+The main benchmark also runs `benchmarks/workloads/memory/manifest.json` with a 256 MiB
 query workspace cap. Set `MEMORY_BOUNDED=0` to skip that suite or change the
 cap with `QUERY_MEMORY_LIMIT_MB`.
 The spill suite uses a 4 MiB cap by default. Set `SPILL=0` to skip it or change
