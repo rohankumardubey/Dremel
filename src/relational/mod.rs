@@ -113,9 +113,9 @@ pub(crate) fn relation_group_key(
         && let Some(index) = row.event
     {
         return match column {
-            "country" => ScalarKey::Dict(catalog.events.country[index]),
-            "device" => ScalarKey::Dict(catalog.events.device[index]),
-            "event_type" => ScalarKey::Dict(catalog.events.event_type[index]),
+            "country" => ScalarKey::Dict(catalog.events.raw_key("country", index) as u32),
+            "device" => ScalarKey::Dict(catalog.events.raw_key("device", index) as u32),
+            "event_type" => ScalarKey::Dict(catalog.events.raw_key("event_type", index) as u32),
             "success" | "campaign_id" => scalar_group_key(catalog.events.scalar(column, index)),
             _ => scalar_group_key(relation_scalar(catalog, row, table, column)),
         };

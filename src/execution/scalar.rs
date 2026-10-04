@@ -477,9 +477,9 @@ pub(crate) fn eval(e: &Expr, t: &Table, i: usize) -> Scalar {
         Expr::Star => Scalar::Int(1),
         Expr::DictEq(c, id, neg) => {
             let v = match c.as_str() {
-                "country" => t.country[i],
-                "device" => t.device[i],
-                "event_type" => t.event_type[i],
+                "country" => t.raw_key("country", i) as u32,
+                "device" => t.raw_key("device", i) as u32,
+                "event_type" => t.raw_key("event_type", i) as u32,
                 _ => u32::MAX,
             };
             Scalar::Bool((v == *id) ^ *neg)
@@ -794,9 +794,9 @@ pub(crate) fn eval_rel(
                 return Scalar::Null;
             };
             let value = match column.rsplit('.').next().unwrap_or(column) {
-                "country" => catalog.events.country[event],
-                "device" => catalog.events.device[event],
-                "event_type" => catalog.events.event_type[event],
+                "country" => catalog.events.raw_key("country", event) as u32,
+                "device" => catalog.events.raw_key("device", event) as u32,
+                "event_type" => catalog.events.raw_key("event_type", event) as u32,
                 _ => return Scalar::Null,
             };
             Scalar::Bool((value == *id) ^ *negated)

@@ -9,6 +9,7 @@ mod columnar;
 mod dimension;
 mod event_columnar;
 mod interoperable;
+mod native;
 pub use columnar::ColumnarTable;
 pub(crate) use dimension::DimensionTable;
 use event_columnar::EventColumnar;
@@ -732,31 +733,7 @@ impl Table {
         Ok(table)
     }
     pub(crate) fn load_binary(path: &str) -> Result<Self, String> {
-        let mut f = File::open(path).map_err(|e| e.to_string())?;
-        let mut magic = [0u8; 8];
-        f.read_exact(&mut magic).map_err(|e| e.to_string())?;
-        if &magic != b"DREMCOL1" {
-            return Err("invalid column-store magic".into());
-        }
-        let version = read_u32(&mut f)?;
-        if version != 1 {
-            return Err(format!("unsupported column-store version {version}"));
-        }
-        let rows = read_u64(&mut f)? as usize;
-        let mut t = Self::empty();
-        t.event_id = read_i64s(&mut f, rows)?;
-        t.user_id = read_i64s(&mut f, rows)?;
-        t.timestamp = read_i64s(&mut f, rows)?;
-        (t.country_dict, t.country) = read_dictionary(&mut f, rows)?;
-        (t.device_dict, t.device) = read_dictionary(&mut f, rows)?;
-        (t.event_dict, t.event_type) = read_dictionary(&mut f, rows)?;
-        t.duration = read_i64s(&mut f, rows)?;
-        t.bytes = read_i64s(&mut f, rows)?;
-        t.score = read_f64s(&mut f, rows)?;
-        t.success = read_bytes(&mut f, rows)?;
-        t.campaign = read_i64s(&mut f, rows)?;
-        t.campaign_def = read_bytes(&mut f, rows)?;
-        Ok(t)
+        native::load_binary(path)
     }
     pub(crate) fn load_csv(path: &str) -> Result<Self, String> {
         let f = File::open(path).map_err(|e| e.to_string())?;
@@ -899,9 +876,24 @@ impl Table {
     }
     pub(crate) fn raw_key(&self, c: &str, i: usize) -> u64 {
         match c.rsplit('.').next().unwrap_or(c) {
-            "country" => self.country[i] as u64,
-            "device" => self.device[i] as u64,
-            "event_type" => self.event_type[i] as u64,
+            "country" => self
+                .country
+                .get(i)
+                .copied()
+                .or_else(|| self.columnar.as_ref()?.dictionary_key("country", i))
+                .expect("country dictionary key") as u64,
+            "device" => self
+                .device
+                .get(i)
+                .copied()
+                .or_else(|| self.columnar.as_ref()?.dictionary_key("device", i))
+                .expect("device dictionary key") as u64,
+            "event_type" => self
+                .event_type
+                .get(i)
+                .copied()
+                .or_else(|| self.columnar.as_ref()?.dictionary_key("event_type", i))
+                .expect("event_type dictionary key") as u64,
             "success" if self.columnar.is_none() => self.success[i] as u64,
             "campaign_id" if self.columnar.is_none() => self.campaign[i] as u64,
             _ => match self.scalar(c, i) {
