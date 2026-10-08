@@ -85,6 +85,13 @@ impl ColumnarTable {
         self.row_count
     }
 
+    pub fn approximate_bytes(&self) -> usize {
+        self.batches
+            .iter()
+            .map(RecordBatch::get_array_memory_size)
+            .sum()
+    }
+
     pub fn batches(&self) -> &[RecordBatch] {
         &self.batches
     }

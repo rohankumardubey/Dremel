@@ -46,6 +46,69 @@ pushed safely remain as residual filters above joins.
 Set `DREMEL_DISABLE_OPTIMIZER=1` to build a comparable unoptimized plan.
 `EXPLAIN` shows physical operators, estimates, join choices, and applied rules.
 
+## Named-table SQL
+
+The Rust CLI accepts `--table NAME` with an Arrow IPC or Parquet file. The
+file schema supplies field names, types, and nullability. Table and column
+identifiers are case insensitive; names that differ only by case are rejected.
+Quoted identifiers are not supported.
+
+This path supports projection (including `SELECT *`), filters, scalar
+expressions, `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, grouping, HAVING, DISTINCT,
+ordering, LIMIT, and OFFSET. ORDER BY must identify one projected column or
+alias. HAVING may reference grouped columns and aggregates. Unsupported
+functions, types, and query shapes produce errors.
+
+Supported inputs are null, boolean, signed and unsigned integers that fit in
+INT64, FLOAT32/FLOAT64, UTF8/LARGEUTF8/UTF8VIEW, primitive dictionaries,
+DECIMAL128 with scale 2, DATE32/DATE64, and timestamps with whole-second values.
+Decimal values must fit the engine's DECIMAL(18,2) range. DATE64 values must
+represent whole days. Subsecond timestamps and out-of-range numeric values
+are rejected rather than truncated. Nested columns can remain in the input
+schema when unreferenced; selecting them requires future nested SQL support.
+
+Execution is serial and scans typed Arrow batches without first converting
+the input into scalar rows. The file is loaded eagerly; joins, windows, CTEs,
+subqueries, UNION, spill, and direct/streaming Parquet flags are unsupported
+in this mode. `--memory-limit-mb` checks resident input after loading, while
+`--query-memory-limit-mb` accounts for column normalization, aggregation,
+distinctness, and result buffers. These are estimates, not a hard process RSS
+limit. A result exceeding `--max-result-rows` fails before any rows are printed.
+
+The Rust API supports preparation and repeated execution against a matching
+schema:
+
+```rust
+use dremel::{ColumnarQuery, ColumnarTable};
+
+let table = ColumnarTable::read("measurements.parquet")?;
+let query = ColumnarQuery::prepare(
+    "measurements",
+    table.schema().clone(),
+    "SELECT region, COUNT(*) AS n FROM measurements GROUP BY region ORDER BY region",
+)?;
+let result = query.execute_with_memory_limit(&table, 64)?;
+result.write_ndjson(&mut std::io::stdout())?;
+```
+
+Results include an Arrow schema and canonical scalar rows. Dates use ISO date
+strings, timestamps use epoch seconds, and decimals use scaled integers inside
+the scalar API. `write_ndjson` uses the same typed JSON format as the CLI.
+Changing the field layout requires preparing the query again. Caller-owned
+input buffers are excluded from the API's query workspace budget.
+
+The schema benchmark runs renamed fields through Arrow and Parquet, checks
+results against SQLite and both built-in engines, and generates an interactive
+report. Preparation, startup loading, and prepared execution are separate:
+
+```bash
+.venv/bin/python benchmarks/scripts/run_schema_benchmark.py --warmup 3 --iterations 20
+```
+
+The full benchmark runner enables this suite by default. Set `SCHEMA_SQL=0`
+to disable it. The built-in controls use one thread and the same logical
+values; their specialized execution paths differ from the named-table path.
+
 ## Parquet execution
 
 `--direct-parquet` keeps only Parquet file metadata resident at startup. Each

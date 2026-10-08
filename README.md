@@ -27,9 +27,9 @@ restrictions, and unsupported features.
 
 Native DREMCOL1 events and eager Arrow IPC and Parquet reads use typed Arrow
 columns. Native string columns retain dictionary encoding; eager interoperable
-reads retain additional fields for all three built-in tables. SQL binding still
-exposes only the fixed `events`, `users`, and `campaigns` columns, and direct
-Parquet scans still use a specialized event layout.
+reads retain additional fields for all three built-in tables. Use `--table NAME`
+to query flat Arrow or Parquet files with your own table and field names;
+the binder derives their types from the schema.
 
 ## Quick start
 
@@ -75,6 +75,23 @@ The two flags are mutually exclusive. Some query shapes fall back to
 materialization in streaming mode; `--stats` reports when that happens. See
 [Parquet execution](docs/sql-support.md#parquet-execution) for the supported
 streaming shapes and pruning rules.
+
+## Query your own data
+
+Named-table queries support flat primitive columns, nullable values, scalar
+expressions, aggregates, grouping, HAVING, DISTINCT, ordering, and limits:
+
+```bash
+./target/release/dremel query \
+  --data measurements.parquet --table measurements \
+  --sql "SELECT region, COUNT(*) AS n FROM measurements GROUP BY region ORDER BY region"
+```
+
+Replace the file and field names with those in your dataset. Named-table
+execution currently loads the file eagerly and runs on one thread. Joins,
+nested fields, and streaming scans require further work for this mode. See
+[named-table SQL](docs/sql-support.md#named-table-sql) for supported types and
+the Rust API.
 
 ## Memory and result streaming
 
@@ -173,12 +190,15 @@ The reference CLI is `benchmarks/cpp/build/dremel-cpp`; it accepts the same
 
 ## Project status
 
-This is a single-node, fixed-schema research engine. It does not yet implement
-the paper's multi-level serving tree or generic nested-field SQL execution.
+This is a single-node research engine with flat named-table SQL. It does not
+yet implement the paper's multi-level serving tree or generic nested-field SQL
+execution.
 The Rust storage boundary can read arbitrary Arrow IPC and Parquet schemas
 through `ColumnarTable`. Eager Arrow and Parquet queries and native DREMCOL1
-queries use typed columnar storage, while direct Parquet event scans remain
-specialized. The generic-schema migration is in progress.
+queries use typed columnar storage. Named-table queries derive flat column
+types from the Arrow schema. Built-in workloads still use specialized
+operators; a catalog for multiple user-defined tables and generic nested
+execution are pending.
 There is a repetition/definition-level round-trip example, but it is not
 connected to the query engine. Distributed storage and exchange, fault
 tolerance, transactions, database wire protocols, and durable spill recovery

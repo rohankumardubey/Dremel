@@ -585,7 +585,7 @@ pub(crate) fn substitute_outer_expr(
     local: &std::collections::HashSet<String>,
     catalog: &Catalog,
     row: RelRow,
-    outer_bindings: &std::collections::HashMap<String, String>,
+    outer_bindings: &Bindings,
 ) {
     if let Expr::Column(column) = expression
         && let Some((qualifier, _)) = column.split_once('.')
@@ -639,7 +639,7 @@ pub(crate) fn execute_subquery(
     query: &Query,
     catalog: &Catalog,
     row: RelRow,
-    outer_bindings: &std::collections::HashMap<String, String>,
+    outer_bindings: &Bindings,
 ) -> Vec<Vec<Scalar>> {
     let mut query = query.clone();
     let mut local = std::collections::HashSet::new();
@@ -668,7 +668,7 @@ pub(crate) fn simple_campaign_lookup(
     query: &Query,
     catalog: &Catalog,
     row: RelRow,
-    outer_bindings: &std::collections::HashMap<String, String>,
+    outer_bindings: &Bindings,
 ) -> Option<Option<usize>> {
     if query.from.name != "campaigns"
         || !query.joins.is_empty()
@@ -722,7 +722,7 @@ pub(crate) fn simple_campaign_max_budget(
     query: &Query,
     catalog: &Catalog,
     row: RelRow,
-    outer_bindings: &std::collections::HashMap<String, String>,
+    outer_bindings: &Bindings,
 ) -> Option<Scalar> {
     if query.from.name != "campaigns" || query.select.len() != 1 || !query.joins.is_empty() {
         return None;
@@ -776,7 +776,7 @@ pub(crate) fn eval_rel(
     expression: &Expr,
     catalog: &Catalog,
     row: RelRow,
-    bindings: &std::collections::HashMap<String, String>,
+    bindings: &Bindings,
 ) -> Scalar {
     match expression {
         Expr::Null => Scalar::Null,

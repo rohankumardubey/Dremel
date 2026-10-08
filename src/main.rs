@@ -1,4 +1,4 @@
-use dremel::{Options, run_bench_server, run_query};
+use dremel::{Options, run_bench_server, run_columnar_bench_server, run_columnar_query, run_query};
 use std::env;
 
 fn value(args: &[String], name: &str, default: &str) -> String {
@@ -51,10 +51,34 @@ fn real_main() -> Result<(), String> {
             .parse()
             .map_err(|_| "invalid --scheduler-memory-mb")?,
     };
+    let table_name = args
+        .iter()
+        .position(|arg| arg == "--table")
+        .map(|index| args.get(index + 1).ok_or("missing --table name"))
+        .transpose()?;
     match command {
-        "bench-server" => run_bench_server(options),
+        "bench-server" => {
+            if let Some(table) = table_name {
+                run_columnar_bench_server(options, table)
+            } else {
+                run_bench_server(options)
+            }
+        }
         "query" => {
-            let sql = value(&args, "--sql", "SELECT COUNT(*) FROM events");
+            let default_sql = format!(
+                "SELECT COUNT(*) FROM {}",
+                table_name.map(String::as_str).unwrap_or("events")
+            );
+            let sql = value(&args, "--sql", &default_sql);
+            if let Some(table) = table_name {
+                return run_columnar_query(
+                    options,
+                    table,
+                    &sql,
+                    args.iter().any(|a| a == "--explain"),
+                    args.iter().any(|a| a == "--stats"),
+                );
+            }
             run_query(
                 options,
                 &sql,
@@ -64,7 +88,7 @@ fn real_main() -> Result<(), String> {
         }
         _ => {
             println!(
-                "dremel query|bench-server --data PATH --threads N --batch-size N [--direct-parquet|--streaming-parquet] [--query-memory-limit-mb N] [--spill-dir PATH] [--stream-results] [--sql SQL] [--explain]"
+                "dremel query|bench-server --data PATH [--table NAME] --threads N --batch-size N [--direct-parquet|--streaming-parquet] [--query-memory-limit-mb N] [--spill-dir PATH] [--stream-results] [--sql SQL] [--explain]"
             );
             Ok(())
         }

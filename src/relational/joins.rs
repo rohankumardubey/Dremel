@@ -3,7 +3,7 @@ use super::*;
 pub(crate) fn join_equality<'a>(
     expression: &'a Expr,
     right_table: &str,
-    bindings: &std::collections::HashMap<String, String>,
+    bindings: &Bindings,
 ) -> Option<(&'a Expr, &'a Expr)> {
     let Expr::Binary(operator, left, right) = expression else {
         return None;
@@ -32,7 +32,7 @@ pub(crate) fn apply_join(
     left_rows: Vec<RelRow>,
     join: &JoinSpec,
     catalog: &Catalog,
-    bindings: &std::collections::HashMap<String, String>,
+    bindings: &Bindings,
     optimizer_enabled: bool,
     filters: &[PushedFilter],
 ) -> Vec<RelRow> {

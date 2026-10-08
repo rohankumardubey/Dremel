@@ -1,0 +1,14 @@
+[
+  {"query_id":"S001","category":"metadata_count","sql":"SELECT COUNT(*) FROM readings","types":["i"]},
+  {"query_id":"S002","category":"selective_numeric_aggregate","sql":"SELECT SUM(payload), AVG(temperature) FROM readings WHERE reading_id <= 100000","types":["i","f"]},
+  {"query_id":"S003","category":"group_and_having","sql":"SELECT region, COUNT(*) AS n, SUM(payload) AS total FROM readings GROUP BY region HAVING COUNT(*) > 0 ORDER BY region ASC","types":["s","i","i"]},
+  {"query_id":"S004","category":"nullable_expression","sql":"SELECT reading_id, COALESCE(optional_ref, 0) AS reference FROM readings WHERE reading_id <= 100 ORDER BY reading_id ASC LIMIT 10 OFFSET 2","types":["i","i"]},
+  {"query_id":"S005","category":"distinct_strings","sql":"SELECT DISTINCT region FROM readings ORDER BY region ASC","types":["s"]},
+  {"query_id":"S006","category":"case_expression","sql":"SELECT reading_id, CASE WHEN accepted THEN payload ELSE 0 END AS chosen FROM readings WHERE reading_id <= 100 ORDER BY reading_id ASC LIMIT 10","types":["i","i"]},
+  {"query_id":"S007","category":"string_functions","sql":"SELECT reading_id, LOWER(region) AS name FROM readings WHERE region LIKE 'U%' AND reading_id <= 1000 ORDER BY reading_id ASC LIMIT 10","types":["i","s"]},
+  {"query_id":"S008","category":"nullable_aggregates","sql":"SELECT COUNT(optional_ref), MIN(temperature), MAX(payload) FROM readings","types":["i","f","i"]},
+  {"query_id":"S009","category":"null_filter","sql":"SELECT reading_id, optional_ref FROM readings WHERE optional_ref IS NULL AND reading_id <= 100 ORDER BY reading_id ASC LIMIT 10","types":["i","i"]},
+  {"query_id":"S010","category":"sort_and_limit","sql":"SELECT reading_id, temperature FROM readings WHERE reading_id <= 100000 ORDER BY temperature DESC, reading_id ASC LIMIT 20","types":["i","f"]},
+  {"query_id":"S011","category":"boolean_and_in","sql":"SELECT COUNT(*) FROM readings WHERE region IN ('US', 'IN') AND accepted","types":["i"]},
+  {"query_id":"S012","category":"empty_aggregate","sql":"SELECT COUNT(*), SUM(payload) FROM readings WHERE reading_id < 0","types":["i","i"]}
+]
