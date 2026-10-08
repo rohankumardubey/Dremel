@@ -716,18 +716,26 @@ impl Table {
     }
     pub(crate) fn from_columnar(data: ColumnarTable) -> Result<Self, String> {
         let columnar = EventColumnar::new(data)?;
-        let mut table = Self::empty();
+        Self::with_event_columnar(columnar, Self::empty())
+    }
+    pub(crate) fn from_projected_columnar(
+        data: ColumnarTable,
+        table: Self,
+    ) -> Result<Self, String> {
+        Self::with_event_columnar(EventColumnar::projected(data)?, table)
+    }
+    fn with_event_columnar(columnar: EventColumnar, mut table: Self) -> Result<Self, String> {
         table.logical_rows = columnar.row_count();
         for row in 0..table.logical_rows {
-            table
-                .country
-                .push(table.country_dict.insert(columnar.string("country", row)));
-            table
-                .device
-                .push(table.device_dict.insert(columnar.string("device", row)));
-            table
-                .event_type
-                .push(table.event_dict.insert(columnar.string("event_type", row)));
+            if let Some(value) = columnar.string("country", row) {
+                table.country.push(table.country_dict.insert(value));
+            }
+            if let Some(value) = columnar.string("device", row) {
+                table.device.push(table.device_dict.insert(value));
+            }
+            if let Some(value) = columnar.string("event_type", row) {
+                table.event_type.push(table.event_dict.insert(value));
+            }
         }
         table.columnar = Some(columnar);
         Ok(table)

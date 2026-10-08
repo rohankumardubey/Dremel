@@ -153,18 +153,18 @@ def main() -> int:
             ):
                 if scans[left]["batches_read"] != scans[right]["batches_read"]:
                     raise RuntimeError(f"{query_id}: Parquet batch counts differ: {scans}")
+            for language in ("rust", "cpp"):
+                streamed = scans[f"{language}_streaming"]
+                materialized = scans[f"{language}_materialized"]
                 if (
-                    scans[left]["peak_decoded_batch_bytes"]
-                    != scans[right]["peak_decoded_batch_bytes"]
+                    not streamed["streaming_fallback"]
+                    and streamed["batches_read"] > 1
+                    and streamed["peak_decoded_batch_bytes"]
+                    >= materialized["peak_decoded_batch_bytes"]
                 ):
-                    raise RuntimeError(f"{query_id}: decoded memory metrics differ: {scans}")
-            if (
-                not scan["streaming_fallback"]
-                and scan["batches_read"] > 1
-                and scan["peak_decoded_batch_bytes"]
-                >= materialized_scan["peak_decoded_batch_bytes"]
-            ):
-                raise RuntimeError(f"{query_id}: streaming did not bound decoded memory: {scans}")
+                    raise RuntimeError(
+                        f"{query_id}: {language} streaming did not bound decoded memory: {scans}"
+                    )
             if scan["columns_read"] != item["expected_columns_read"]:
                 raise RuntimeError(
                     f"{query_id}: expected {item['expected_columns_read']} columns, got {scan}"

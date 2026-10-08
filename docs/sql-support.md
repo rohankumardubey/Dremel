@@ -58,8 +58,9 @@ column-chunk bytes. The byte counter is the sum of selected compressed chunks
 from file metadata, not an operating-system I/O counter. Query `--stats`
 reports the same scan counters.
 
-The selected row groups are decoded into the existing in-memory operators.
-Dimension tables used by joins retain the existing load path.
+Selected row groups are decoded into projected Arrow columns before entering
+the existing in-memory operators. Dimension tables used by joins retain the
+existing load path.
 
 `--streaming-parquet` uses the same projection and pruning plan but decodes at
 most `--batch-size` rows through the official Arrow record-batch reader before
@@ -67,7 +68,9 @@ passing the batch to a scan or aggregate operator. Dictionary identifiers stay
 stable between batches, and final ordering, distinctness, limits, and offsets
 are applied across the complete result. Metadata-only `COUNT(*)` decodes no
 data batches. Query stats include batches read, peak decoded batch bytes, and
-the fallback state.
+the fallback state. The decoded-memory estimate reflects each engine's own
+in-memory representation, so its Rust and C++ values are not byte-for-byte
+comparable.
 
 Inner and left joins from `events` to `users.user_id` or
 `campaigns.campaign_id` stream fact batches through a cached primary-key index.
