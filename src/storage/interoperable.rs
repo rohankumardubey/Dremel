@@ -2,6 +2,10 @@ use super::{ColumnarTable, DimensionTable, Table};
 use crate::execution::scalar::cmp;
 use crate::sql::{Expr, Query};
 use crate::types::{Scalar, execution_cancelled};
+use arrow::array::{Array, ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray};
+use arrow::compute::cast;
+use arrow::datatypes::DataType;
+use arrow::record_batch::RecordBatch;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::RowGroupMetaData;
@@ -10,6 +14,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 
 pub(super) fn load_arrow_ipc(path: &str) -> Result<Table, String> {
     Table::from_columnar(ColumnarTable::read(path)?)
@@ -333,21 +338,15 @@ pub(crate) fn load_parquet_direct(
         .with_row_groups(row_groups)
         .build()
         .map_err(|error| error.to_string())?;
-    let mut batches = Vec::new();
+    let mut table = Table::empty();
     for batch in reader {
         if execution_cancelled() {
             return Err("query cancelled during Parquet scan".into());
         }
-        let batch = batch.map_err(|error| error.to_string())?;
-        batches.push(batch);
+        append_projected_batch(&mut table, &batch.map_err(|error| error.to_string())?)?;
         metrics.batches_read += 1;
+        metrics.peak_decoded_batch_bytes = table.approximate_bytes();
     }
-    let Some(schema) = batches.first().map(|batch| batch.schema()) else {
-        return Ok((Table::empty(), metrics));
-    };
-    let table =
-        Table::from_projected_columnar(ColumnarTable::try_new(schema, batches)?, Table::empty())?;
-    metrics.peak_decoded_batch_bytes = table.approximate_bytes();
     Ok((table, metrics))
 }
 
@@ -382,9 +381,7 @@ where
         table.country_dict = country;
         table.device_dict = device;
         table.event_dict = event;
-        let batch = batch.map_err(|error| error.to_string())?;
-        let data = ColumnarTable::try_new(batch.schema(), vec![batch])?;
-        table = Table::from_projected_columnar(data, table)?;
+        append_projected_batch(&mut table, &batch.map_err(|error| error.to_string())?)?;
         country = table.country_dict.clone();
         device = table.device_dict.clone();
         event = table.event_dict.clone();
@@ -400,6 +397,165 @@ where
     dictionaries.device_dict = device;
     dictionaries.event_dict = event;
     Ok((dictionaries, metrics))
+}
+
+fn optional_cast(
+    batch: &RecordBatch,
+    name: &str,
+    data_type: &DataType,
+) -> Result<Option<ArrayRef>, String> {
+    batch
+        .column_by_name(name)
+        .map(|array| {
+            cast(array, data_type).map_err(|error| format!("invalid {name} column: {error}"))
+        })
+        .transpose()
+}
+
+fn append_projected_batch(table: &mut Table, batch: &RecordBatch) -> Result<(), String> {
+    table.logical_rows += batch.num_rows();
+    let event_id = optional_cast(batch, "event_id", &DataType::Int64)?;
+    let user_id = optional_cast(batch, "user_id", &DataType::Int64)?;
+    let timestamp = optional_cast(batch, "timestamp", &DataType::Int64)?;
+    let duration = optional_cast(batch, "duration_ms", &DataType::Int64)?;
+    let bytes = optional_cast(batch, "bytes", &DataType::Int64)?;
+    let score = optional_cast(batch, "score", &DataType::Float64)?;
+    let success = optional_cast(batch, "success", &DataType::Boolean)?;
+    let campaign = optional_cast(batch, "campaign_id", &DataType::Int64)?;
+    let country = optional_cast(batch, "country", &DataType::Utf8)?;
+    let device = optional_cast(batch, "device", &DataType::Utf8)?;
+    let event_type = optional_cast(batch, "event_type", &DataType::Utf8)?;
+
+    let event_id = event_id
+        .as_ref()
+        .map(|array| downcast::<Int64Array>(array, "event_id"))
+        .transpose()?;
+    let user_id = user_id
+        .as_ref()
+        .map(|array| downcast::<Int64Array>(array, "user_id"))
+        .transpose()?;
+    let timestamp = timestamp
+        .as_ref()
+        .map(|array| downcast::<Int64Array>(array, "timestamp"))
+        .transpose()?;
+    let duration = duration
+        .as_ref()
+        .map(|array| downcast::<Int64Array>(array, "duration_ms"))
+        .transpose()?;
+    let bytes = bytes
+        .as_ref()
+        .map(|array| downcast::<Int64Array>(array, "bytes"))
+        .transpose()?;
+    let score = score
+        .as_ref()
+        .map(|array| downcast::<Float64Array>(array, "score"))
+        .transpose()?;
+    let success = success
+        .as_ref()
+        .map(|array| downcast::<BooleanArray>(array, "success"))
+        .transpose()?;
+    let campaign = campaign
+        .as_ref()
+        .map(|array| downcast::<Int64Array>(array, "campaign_id"))
+        .transpose()?;
+    let country = country
+        .as_ref()
+        .map(|array| downcast::<StringArray>(array, "country"))
+        .transpose()?;
+    let device = device
+        .as_ref()
+        .map(|array| downcast::<StringArray>(array, "device"))
+        .transpose()?;
+    let event_type = event_type
+        .as_ref()
+        .map(|array| downcast::<StringArray>(array, "event_type"))
+        .transpose()?;
+
+    for row in 0..batch.num_rows() {
+        if let Some(array) = event_id {
+            if array.is_null(row) {
+                return Err(format!("required column event_id is null at row {row}"));
+            }
+            table.event_id.push(array.value(row));
+        }
+        if let Some(array) = user_id {
+            if array.is_null(row) {
+                return Err(format!("required column user_id is null at row {row}"));
+            }
+            table.user_id.push(array.value(row));
+        }
+        if let Some(array) = timestamp {
+            if array.is_null(row) {
+                return Err(format!("required column timestamp is null at row {row}"));
+            }
+            table.timestamp.push(array.value(row));
+        }
+        if let Some(array) = country {
+            if array.is_null(row) {
+                return Err(format!("required column country is null at row {row}"));
+            }
+            table
+                .country
+                .push(table.country_dict.insert(array.value(row)));
+        }
+        if let Some(array) = device {
+            if array.is_null(row) {
+                return Err(format!("required column device is null at row {row}"));
+            }
+            table
+                .device
+                .push(table.device_dict.insert(array.value(row)));
+        }
+        if let Some(array) = event_type {
+            if array.is_null(row) {
+                return Err(format!("required column event_type is null at row {row}"));
+            }
+            table
+                .event_type
+                .push(table.event_dict.insert(array.value(row)));
+        }
+        if let Some(array) = duration {
+            if array.is_null(row) {
+                return Err(format!("required column duration_ms is null at row {row}"));
+            }
+            table.duration.push(array.value(row));
+        }
+        if let Some(array) = bytes {
+            if array.is_null(row) {
+                return Err(format!("required column bytes is null at row {row}"));
+            }
+            table.bytes.push(array.value(row));
+        }
+        if let Some(array) = score {
+            if array.is_null(row) {
+                return Err(format!("required column score is null at row {row}"));
+            }
+            table.score.push(array.value(row));
+        }
+        if let Some(array) = success {
+            if array.is_null(row) {
+                return Err(format!("required column success is null at row {row}"));
+            }
+            table.success.push(u8::from(array.value(row)));
+        }
+        if let Some(array) = campaign {
+            if array.is_null(row) {
+                table.campaign.push(0);
+                table.campaign_def.push(0);
+            } else {
+                table.campaign.push(array.value(row));
+                table.campaign_def.push(1);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn downcast<'a, T: 'static>(array: &'a Arc<dyn Array>, name: &str) -> Result<&'a T, String> {
+    array
+        .as_any()
+        .downcast_ref::<T>()
+        .ok_or_else(|| format!("unsupported {name} array type {}", array.data_type()))
 }
 
 pub(super) fn load_users(path: &Path) -> Result<DimensionTable, String> {

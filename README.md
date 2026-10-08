@@ -25,11 +25,11 @@ and it is not production-ready.
 See [SQL support](docs/sql-support.md) for exact syntax, execution-mode
 restrictions, and unsupported features.
 
-Native DREMCOL1 events, eager Arrow IPC and Parquet reads, and projected direct
-Parquet scans use typed Arrow columns. Native string columns retain dictionary
-encoding; eager interoperable reads retain additional fields for all three
-built-in tables. SQL binding still exposes only the fixed `events`, `users`,
-and `campaigns` columns.
+Native DREMCOL1 events and eager Arrow IPC and Parquet reads use typed Arrow
+columns. Native string columns retain dictionary encoding; eager interoperable
+reads retain additional fields for all three built-in tables. SQL binding still
+exposes only the fixed `events`, `users`, and `campaigns` columns, and direct
+Parquet scans still use a specialized event layout.
 
 ## Quick start
 
@@ -177,9 +177,8 @@ This is a single-node, fixed-schema research engine. It does not yet implement
 the paper's multi-level serving tree or generic nested-field SQL execution.
 The Rust storage boundary can read arbitrary Arrow IPC and Parquet schemas
 through `ColumnarTable`. Eager Arrow and Parquet queries and native DREMCOL1
-queries and direct Parquet event scans use typed columnar storage. SQL binding
-is still fixed to the three built-in tables, so the generic-schema migration
-is in progress.
+queries use typed columnar storage, while direct Parquet event scans remain
+specialized. The generic-schema migration is in progress.
 There is a repetition/definition-level round-trip example, but it is not
 connected to the query engine. Distributed storage and exchange, fault
 tolerance, transactions, database wire protocols, and durable spill recovery

@@ -26,17 +26,17 @@ pub(super) const COLUMNS: [(&str, DataType); 11] = [
 pub(crate) struct EventColumnar {
     data: ColumnarTable,
     cast_bytes: usize,
-    event_id: Option<Int64Array>,
-    user_id: Option<Int64Array>,
-    timestamp: Option<Int64Array>,
-    country: Option<TextColumn>,
-    device: Option<TextColumn>,
-    event_type: Option<TextColumn>,
-    duration: Option<Int64Array>,
-    bytes: Option<Int64Array>,
-    score: Option<Float64Array>,
-    success: Option<BooleanArray>,
-    campaign: Option<Int64Array>,
+    event_id: Int64Array,
+    user_id: Int64Array,
+    timestamp: Int64Array,
+    country: TextColumn,
+    device: TextColumn,
+    event_type: TextColumn,
+    duration: Int64Array,
+    bytes: Int64Array,
+    score: Float64Array,
+    success: BooleanArray,
+    campaign: Int64Array,
 }
 
 enum TextColumn {
@@ -76,30 +76,14 @@ impl TextColumn {
 
 impl EventColumnar {
     pub(crate) fn new(data: ColumnarTable) -> Result<Self, String> {
-        Self::build(data, true)
-    }
-
-    pub(crate) fn projected(data: ColumnarTable) -> Result<Self, String> {
-        Self::build(data, false)
-    }
-
-    fn build(data: ColumnarTable, require_all: bool) -> Result<Self, String> {
         let schema = data.schema().clone();
-        let batch = if let [batch] = data.batches() {
-            batch.clone()
-        } else {
-            concat_batches(&schema, data.batches()).map_err(|error| error.to_string())?
-        };
+        let batch = concat_batches(&schema, data.batches()).map_err(|error| error.to_string())?;
         let mut columns = Vec::with_capacity(COLUMNS.len());
         let mut cast_bytes = 0usize;
         for (name, data_type) in &COLUMNS {
-            let Some(array) = batch.column_by_name(name) else {
-                if require_all {
-                    return Err(format!("missing required column {name}"));
-                }
-                columns.push(None);
-                continue;
-            };
+            let array = batch
+                .column_by_name(name)
+                .ok_or_else(|| format!("missing required column {name}"))?;
             let dictionary_text = *data_type == DataType::Utf8
                 && matches!(
                     array.data_type(),
@@ -118,23 +102,23 @@ impl EventColumnar {
             if *name != "campaign_id" && array.null_count() != 0 {
                 return Err(format!("required column {name} contains null"));
             }
-            columns.push(Some(array));
+            columns.push(array);
         }
         let data = ColumnarTable::try_new(schema, vec![batch])?;
         Ok(Self {
             data,
             cast_bytes,
-            event_id: columns[0].as_ref().map(typed),
-            user_id: columns[1].as_ref().map(typed),
-            timestamp: columns[2].as_ref().map(typed),
-            country: columns[3].as_ref().map(TextColumn::new),
-            device: columns[4].as_ref().map(TextColumn::new),
-            event_type: columns[5].as_ref().map(TextColumn::new),
-            duration: columns[6].as_ref().map(typed),
-            bytes: columns[7].as_ref().map(typed),
-            score: columns[8].as_ref().map(typed),
-            success: columns[9].as_ref().map(typed),
-            campaign: columns[10].as_ref().map(typed),
+            event_id: typed(&columns[0]),
+            user_id: typed(&columns[1]),
+            timestamp: typed(&columns[2]),
+            country: TextColumn::new(&columns[3]),
+            device: TextColumn::new(&columns[4]),
+            event_type: TextColumn::new(&columns[5]),
+            duration: typed(&columns[6]),
+            bytes: typed(&columns[7]),
+            score: typed(&columns[8]),
+            success: typed(&columns[9]),
+            campaign: typed(&columns[10]),
         })
     }
 
@@ -153,74 +137,41 @@ impl EventColumnar {
     }
 
     pub(crate) fn campaign_null_count(&self) -> usize {
-        self.campaign.as_ref().map_or(0, Array::null_count)
+        self.campaign.null_count()
     }
 
-    pub(crate) fn string(&self, column: &str, row: usize) -> Option<&str> {
+    pub(crate) fn string(&self, column: &str, row: usize) -> &str {
         match column {
-            "country" => self.country.as_ref().map(|values| values.value(row)),
-            "device" => self.device.as_ref().map(|values| values.value(row)),
-            "event_type" => self.event_type.as_ref().map(|values| values.value(row)),
+            "country" => self.country.value(row),
+            "device" => self.device.value(row),
+            "event_type" => self.event_type.value(row),
             _ => panic!("unknown event string column {column}"),
         }
     }
 
     pub(crate) fn dictionary_key(&self, column: &str, row: usize) -> Option<u32> {
         match column {
-            "country" => self.country.as_ref().and_then(|values| values.key(row)),
-            "device" => self.device.as_ref().and_then(|values| values.key(row)),
-            "event_type" => self.event_type.as_ref().and_then(|values| values.key(row)),
+            "country" => self.country.key(row),
+            "device" => self.device.key(row),
+            "event_type" => self.event_type.key(row),
             _ => None,
         }
     }
 
     pub(crate) fn scalar(&self, column: &str, row: usize) -> Scalar {
         match column {
-            "event_id" => self
-                .event_id
-                .as_ref()
-                .map_or(Scalar::Null, |v| Scalar::Int(v.value(row))),
-            "user_id" => self
-                .user_id
-                .as_ref()
-                .map_or(Scalar::Null, |v| Scalar::Int(v.value(row))),
-            "timestamp" => self
-                .timestamp
-                .as_ref()
-                .map_or(Scalar::Null, |v| Scalar::Int(v.value(row))),
-            "country" => self
-                .country
-                .as_ref()
-                .map_or(Scalar::Null, |v| Scalar::Str(v.value(row).into())),
-            "device" => self
-                .device
-                .as_ref()
-                .map_or(Scalar::Null, |v| Scalar::Str(v.value(row).into())),
-            "event_type" => self
-                .event_type
-                .as_ref()
-                .map_or(Scalar::Null, |v| Scalar::Str(v.value(row).into())),
-            "duration_ms" => self
-                .duration
-                .as_ref()
-                .map_or(Scalar::Null, |v| Scalar::Int(v.value(row))),
-            "bytes" => self
-                .bytes
-                .as_ref()
-                .map_or(Scalar::Null, |v| Scalar::Int(v.value(row))),
-            "score" => self
-                .score
-                .as_ref()
-                .map_or(Scalar::Null, |v| Scalar::Float(v.value(row))),
-            "success" => self
-                .success
-                .as_ref()
-                .map_or(Scalar::Null, |v| Scalar::Bool(v.value(row))),
-            "campaign_id" if self.campaign.as_ref().is_some_and(|v| v.is_null(row)) => Scalar::Null,
-            "campaign_id" => self
-                .campaign
-                .as_ref()
-                .map_or(Scalar::Null, |v| Scalar::Int(v.value(row))),
+            "event_id" => Scalar::Int(self.event_id.value(row)),
+            "user_id" => Scalar::Int(self.user_id.value(row)),
+            "timestamp" => Scalar::Int(self.timestamp.value(row)),
+            "country" => Scalar::Str(self.country.value(row).into()),
+            "device" => Scalar::Str(self.device.value(row).into()),
+            "event_type" => Scalar::Str(self.event_type.value(row).into()),
+            "duration_ms" => Scalar::Int(self.duration.value(row)),
+            "bytes" => Scalar::Int(self.bytes.value(row)),
+            "score" => Scalar::Float(self.score.value(row)),
+            "success" => Scalar::Bool(self.success.value(row)),
+            "campaign_id" if self.campaign.is_null(row) => Scalar::Null,
+            "campaign_id" => Scalar::Int(self.campaign.value(row)),
             _ => Scalar::Null,
         }
     }
@@ -332,52 +283,6 @@ mod tests {
             assert!(table.bytes.is_empty());
             assert!(table.columnar.as_ref().unwrap().data.field("extra").is_ok());
         }
-    }
-
-    #[test]
-    fn projected_batches_keep_typed_values_and_stable_dictionary_ids() {
-        let (_, batch) = fixture();
-        let projected = batch.project(&[0, 3, 10]).unwrap();
-        let first = projected.slice(0, 2);
-        let second = projected.slice(2, 1);
-        let data = ColumnarTable::try_new(projected.schema(), vec![first, second]).unwrap();
-        let table = Table::from_projected_columnar(data, Table::empty()).unwrap();
-        assert_eq!(table.len(), 3);
-        assert_eq!(table.scalar("event_id", 2), Scalar::Int(3));
-        assert_eq!(table.scalar("campaign_id", 1), Scalar::Null);
-        assert_eq!(table.scalar("country", 0), Scalar::Str("US".into()));
-        assert_eq!(table.scalar("device", 0), Scalar::Null);
-        assert_eq!(table.raw_key("country", 0), table.raw_key("country", 2));
-        assert!(table.event_id.is_empty());
-        assert!(table.campaign.is_empty());
-        assert_eq!(table.campaign_null_count(), 1);
-
-        let mut next = Table::empty();
-        next.country_dict = table.country_dict.clone();
-        let data = ColumnarTable::try_new(projected.schema(), vec![projected.slice(0, 1)]).unwrap();
-        let next = Table::from_projected_columnar(data, next).unwrap();
-        assert_eq!(table.raw_key("country", 0), next.raw_key("country", 0));
-    }
-
-    #[test]
-    fn projected_columns_still_reject_null_required_values() {
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "event_id",
-            DataType::Int64,
-            true,
-        )]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(Int64Array::from(vec![Some(1), None]))],
-        )
-        .unwrap();
-        let data = ColumnarTable::try_new(schema, vec![batch]).unwrap();
-        assert!(
-            Table::from_projected_columnar(data, Table::empty())
-                .err()
-                .unwrap()
-                .contains("required column event_id contains null")
-        );
     }
 
     #[test]
