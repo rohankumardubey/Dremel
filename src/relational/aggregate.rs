@@ -58,7 +58,7 @@ pub(crate) fn update_rel_aggregate(
     expression: &Expr,
     catalog: &Catalog,
     row: RelRow,
-    bindings: &std::collections::HashMap<String, String>,
+    bindings: &Bindings,
 ) {
     let Expr::Func(_, argument) = expression else {
         unreachable!()
@@ -102,7 +102,7 @@ pub(crate) fn eval_group_expr(
     expression: &Expr,
     catalog: &Catalog,
     row: RelRow,
-    bindings: &std::collections::HashMap<String, String>,
+    bindings: &Bindings,
     aggregates: &[Expr],
     values: &[Scalar],
 ) -> Scalar {

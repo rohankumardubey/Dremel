@@ -30,7 +30,7 @@ pub(super) fn owned_conjuncts(expression: Expr, output: &mut Vec<Expr>) {
 
 fn expression_relations(
     expression: &Expr,
-    bindings: &HashMap<String, String>,
+    bindings: &Bindings,
     output: &mut HashSet<String>,
 ) -> bool {
     match expression {

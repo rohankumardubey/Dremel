@@ -25,23 +25,30 @@ pub(crate) fn eval_materialized_values(
     columns: &[String],
     row: &[Scalar],
 ) -> Scalar {
-    let evaluate = |value: &Expr| eval_materialized_values(value, columns, row);
+    eval_with_columns(expression, &|column| {
+        let exact = columns.iter().position(|candidate| candidate == column);
+        let name = column.rsplit('.').next().unwrap_or(column);
+        let mut unqualified = columns
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| candidate.rsplit('.').next() == Some(name));
+        let fallback = unqualified
+            .next()
+            .and_then(|(index, _)| unqualified.next().is_none().then_some(index));
+        exact
+            .or(fallback)
+            .map_or(Scalar::Null, |index| row[index].clone())
+    })
+}
+
+pub(crate) fn eval_with_columns(
+    expression: &Expr,
+    column_value: &impl Fn(&str) -> Scalar,
+) -> Scalar {
+    let evaluate = |value: &Expr| eval_with_columns(value, column_value);
     match expression {
         Expr::Null => Scalar::Null,
-        Expr::Column(column) => {
-            let exact = columns.iter().position(|candidate| candidate == column);
-            let name = column.rsplit('.').next().unwrap_or(column);
-            let mut unqualified = columns
-                .iter()
-                .enumerate()
-                .filter(|(_, candidate)| candidate.rsplit('.').next() == Some(name));
-            let fallback = unqualified
-                .next()
-                .and_then(|(index, _)| unqualified.next().is_none().then_some(index));
-            exact
-                .or(fallback)
-                .map_or(Scalar::Null, |index| row[index].clone())
-        }
+        Expr::Column(column) => column_value(column),
         Expr::Int(value) => Scalar::Int(*value),
         Expr::Float(value) => Scalar::Float(*value),
         Expr::Bool(value) => Scalar::Bool(*value),
@@ -148,9 +155,13 @@ pub(crate) fn update_materialized_aggregate(
         unreachable!()
     };
     let value = eval_materialized(argument, relation, row);
+    update_scalar_aggregate(state, matches!(argument.as_ref(), Expr::Star), value);
+}
+
+pub(crate) fn update_scalar_aggregate(state: &mut AggState, count_star: bool, value: Scalar) {
     match state {
         AggState::Count(count) => {
-            if matches!(argument.as_ref(), Expr::Star) || !matches!(value, Scalar::Null) {
+            if count_star || !matches!(value, Scalar::Null) {
                 *count += 1;
             }
         }
@@ -189,6 +200,17 @@ pub(crate) fn eval_materialized_group(
     aggregates: &[Expr],
     values: &[Scalar],
 ) -> Scalar {
+    eval_group_with_columns(expression, aggregates, values, &|column| {
+        eval_materialized(&Expr::Column(column.into()), relation, row)
+    })
+}
+
+pub(crate) fn eval_group_with_columns(
+    expression: &Expr,
+    aggregates: &[Expr],
+    values: &[Scalar],
+    column_value: &impl Fn(&str) -> Scalar,
+) -> Scalar {
     if is_agg(expression) {
         let key = format!("{expression:?}");
         return aggregates
@@ -197,9 +219,9 @@ pub(crate) fn eval_materialized_group(
             .map_or(Scalar::Null, |index| values[index].clone());
     }
     if !contains_agg(expression) {
-        return eval_materialized(expression, relation, row);
+        return eval_with_columns(expression, column_value);
     }
-    let evaluate = |value: &Expr| eval_materialized_group(value, relation, row, aggregates, values);
+    let evaluate = |value: &Expr| eval_group_with_columns(value, aggregates, values, column_value);
     match expression {
         Expr::Binary(operator, left, right) => {
             apply_binary(operator, evaluate(left), evaluate(right))

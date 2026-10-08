@@ -89,7 +89,7 @@ pub(crate) fn compute_window(
     expression: &Expr,
     relation: &[RelRow],
     catalog: &Catalog,
-    bindings: &std::collections::HashMap<String, String>,
+    bindings: &Bindings,
 ) -> Vec<Scalar> {
     if !account_query_memory_or_stop(
         relation
@@ -228,7 +228,7 @@ pub(crate) fn eval_window_expr(
     row_index: usize,
     relation: &[RelRow],
     catalog: &Catalog,
-    bindings: &std::collections::HashMap<String, String>,
+    bindings: &Bindings,
     windows: &[Expr],
     values: &[Vec<Scalar>],
 ) -> Scalar {

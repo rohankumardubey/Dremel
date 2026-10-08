@@ -10,16 +10,44 @@ use std::thread;
 #[derive(Clone)]
 pub(crate) struct SumState {
     pub(crate) value: f64,
-    pub(crate) decimal_units: i128,
+    /// Integer or scaled decimal total before floating-point promotion.
+    pub(crate) exact_units: i128,
     pub(crate) floating: bool,
     pub(crate) decimal: bool,
     pub(crate) has: bool,
+}
+
+#[cfg(test)]
+mod sum_tests {
+    use super::*;
+
+    #[test]
+    fn merges_exact_and_promoted_numeric_sums() {
+        for (left, right, expected) in [
+            (
+                Scalar::Int(9_007_199_254_740_993),
+                Scalar::Int(2),
+                Scalar::Int(9_007_199_254_740_995),
+            ),
+            (Scalar::Int(2), Scalar::Decimal(150), Scalar::Decimal(350)),
+            (Scalar::Decimal(150), Scalar::Int(2), Scalar::Decimal(350)),
+            (Scalar::Int(2), Scalar::Float(1.5), Scalar::Float(3.5)),
+            (Scalar::Float(1.5), Scalar::Int(2), Scalar::Float(3.5)),
+        ] {
+            let mut first = SumState::new();
+            first.add(&left);
+            let mut second = SumState::new();
+            second.add(&right);
+            first.merge(&second);
+            assert_eq!(first.finish(), expected);
+        }
+    }
 }
 impl SumState {
     pub(crate) fn new() -> Self {
         Self {
             value: 0.0,
-            decimal_units: 0,
+            exact_units: 0,
             floating: false,
             decimal: false,
             has: false,
@@ -29,19 +57,19 @@ impl SumState {
         match value {
             Scalar::Decimal(units) if !self.floating => {
                 if !self.decimal {
-                    self.decimal_units = (self.value as i128) * 100;
+                    self.exact_units *= 100;
                     self.decimal = true;
                 }
-                self.decimal_units += i128::from(*units);
+                self.exact_units += i128::from(*units);
                 self.has = true;
             }
-            Scalar::Int(value) if self.decimal && !self.floating => {
-                self.decimal_units += i128::from(*value) * 100;
+            Scalar::Int(value) if !self.floating => {
+                self.exact_units += i128::from(*value) * if self.decimal { 100 } else { 1 };
                 self.has = true;
             }
             value if value.number().is_some() => {
-                if self.decimal {
-                    self.value = self.decimal_units as f64 / 100.0;
+                if !self.floating {
+                    self.value = self.exact_units as f64 / if self.decimal { 100.0 } else { 1.0 };
                     self.decimal = false;
                 }
                 self.value += value.number().expect("numeric");
@@ -55,36 +83,45 @@ impl SumState {
         if !other.has {
             return;
         }
-        if self.decimal && other.decimal && !self.floating && !other.floating {
-            self.decimal_units += other.decimal_units;
-            self.has = true;
-            return;
-        }
-        if !self.has && other.decimal && !other.floating {
+        if !self.has {
             *self = other.clone();
             return;
         }
-        if self.decimal {
-            self.value = self.decimal_units as f64 / 100.0;
+        if !self.floating && !other.floating {
+            if other.decimal && !self.decimal {
+                self.exact_units *= 100;
+            }
+            self.exact_units += other.exact_units
+                * if self.decimal && !other.decimal {
+                    100
+                } else {
+                    1
+                };
+            self.decimal |= other.decimal;
+            self.has = true;
+            return;
+        }
+        if !self.floating {
+            self.value = self.exact_units as f64 / if self.decimal { 100.0 } else { 1.0 };
             self.decimal = false;
         }
-        self.value += if other.decimal {
-            other.decimal_units as f64 / 100.0
-        } else {
+        self.value += if other.floating {
             other.value
+        } else {
+            other.exact_units as f64 / if other.decimal { 100.0 } else { 1.0 }
         };
-        self.floating |= other.floating;
+        self.floating = true;
         self.has = true;
     }
     pub(crate) fn finish(&self) -> Scalar {
         if !self.has {
             Scalar::Null
         } else if self.decimal && !self.floating {
-            i64::try_from(self.decimal_units).map_or(Scalar::Null, Scalar::Decimal)
+            i64::try_from(self.exact_units).map_or(Scalar::Null, Scalar::Decimal)
         } else if self.floating {
             Scalar::Float(self.value)
         } else {
-            Scalar::Int(self.value as i64)
+            i64::try_from(self.exact_units).map_or(Scalar::Null, Scalar::Int)
         }
     }
 }

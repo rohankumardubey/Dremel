@@ -1,13 +1,13 @@
 use super::*;
 
 pub(crate) fn base_relation_rows(table: &str, catalog: &Catalog) -> Vec<RelRow> {
-    base_relation_rows_filtered(table, catalog, &std::collections::HashMap::new(), &[])
+    base_relation_rows_filtered(table, catalog, &Bindings::default(), &[])
 }
 
 pub(crate) fn base_relation_rows_filtered(
     table: &str,
     catalog: &Catalog,
-    bindings: &std::collections::HashMap<String, String>,
+    bindings: &Bindings,
     filters: &[PushedFilter],
 ) -> Vec<RelRow> {
     let (rows, relation) = match table {

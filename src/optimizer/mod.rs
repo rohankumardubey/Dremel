@@ -1,6 +1,6 @@
 use crate::execution::scalar::{apply_binary, cast_value, decimal_text, eval_values, like_matches};
 use crate::sql::*;
-use crate::storage::{Table, query_bindings, resolve_column};
+use crate::storage::{Bindings, Table, query_bindings, resolve_column};
 use crate::types::Scalar;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
