@@ -1,4 +1,7 @@
-use dremel::{Options, run_bench_server, run_columnar_bench_server, run_columnar_query, run_query};
+use dremel::{
+    Options, run_bench_server, run_columnar_bench_server, run_columnar_query, run_query,
+    run_scan_cli,
+};
 use std::env;
 
 fn value(args: &[String], name: &str, default: &str) -> String {
@@ -17,6 +20,9 @@ fn main() {
 fn real_main() -> Result<(), String> {
     let args: Vec<String> = env::args().collect();
     let command = args.get(1).map(String::as_str).unwrap_or("help");
+    if command == "scan" {
+        return run_scan_cli(&args[2..]);
+    }
     let options = Options {
         data: value(&args, "--data", "data/events.csv"),
         direct_parquet: args.iter().any(|arg| arg == "--direct-parquet"),
@@ -90,6 +96,7 @@ fn real_main() -> Result<(), String> {
             println!(
                 "dremel query|bench-server --data PATH [--table NAME] --threads N --batch-size N [--direct-parquet|--streaming-parquet] [--query-memory-limit-mb N] [--spill-dir PATH] [--stream-results] [--sql SQL] [--explain]"
             );
+            println!("dremel scan --help");
             Ok(())
         }
     }

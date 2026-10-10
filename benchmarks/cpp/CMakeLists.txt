@@ -33,3 +33,7 @@ target_compile_options(dremel-cpp-tests PRIVATE -UNDEBUG)
 target_link_libraries(dremel-cpp-tests PRIVATE Threads::Threads Arrow::arrow_shared Parquet::parquet_shared)
 enable_testing()
 add_test(NAME dremel_cpp_tests COMMAND dremel-cpp-tests self-test ${CMAKE_SOURCE_DIR}/../workloads/queries)
+
+add_executable(dremel-nested-scan src/nested_scan/scan.cpp)
+target_compile_options(dremel-nested-scan PRIVATE $<$<CONFIG:Release>:-O3>)
+target_link_libraries(dremel-nested-scan PRIVATE Arrow::arrow_shared Parquet::parquet_shared)
