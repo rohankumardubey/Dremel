@@ -10,7 +10,8 @@ use std::path::Path;
 /// An Arrow-backed table with a schema independent of the engine's current SQL tables.
 ///
 /// Each batch retains its original typed Arrow arrays, including null bitmaps and
-/// nested data. SQL binding currently recognizes only the built-in schemas.
+/// nested data. Named-table SQL supports flat primitive fields; nested scans
+/// retain containers and parent validity without flattening records.
 #[derive(Debug)]
 pub struct ColumnarTable {
     schema: SchemaRef,

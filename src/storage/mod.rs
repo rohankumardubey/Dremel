@@ -11,12 +11,14 @@ mod dimension;
 mod event_columnar;
 mod interoperable;
 mod native;
+mod nested_scan;
 mod primitive;
 pub(crate) use binding::*;
 pub use columnar::ColumnarTable;
 pub(crate) use dimension::DimensionTable;
 use event_columnar::EventColumnar;
 pub(crate) use interoperable::ParquetScanMetrics;
+pub use nested_scan::{ParquetScan, ParquetScanOptions, ParquetScanPlan};
 pub(crate) use primitive::PrimitiveBatch;
 
 #[derive(Clone, Default)]

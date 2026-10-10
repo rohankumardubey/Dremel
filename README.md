@@ -93,6 +93,23 @@ nested fields, and streaming scans require further work for this mode. See
 [named-table SQL](docs/sql-support.md#named-table-sql) for supported types and
 the Rust API.
 
+## Scan nested Parquet
+
+Read nested STRUCT/LIST data without flattening records or decoding unrelated
+leaf columns:
+
+```bash
+./target/release/dremel scan --data records.parquet \
+  --columns profile.city,items.price --batch-size 4096 \
+  --output selected.arrow
+```
+
+The output retains parent nulls, null lists, empty lists, and null elements.
+Omit `--output` to scan without exporting data; the command prints a JSON scan
+summary. See [nested Parquet scans](docs/nested-parquet.md) for the Rust API,
+row-group selection, metrics, and benchmarks. This is a storage scan, not
+nested SQL or UNNEST.
+
 ## Memory and result streaming
 
 `--query-memory-limit-mb` caps accounted query workspace, while
@@ -198,7 +215,8 @@ through `ColumnarTable`. Eager Arrow and Parquet queries and native DREMCOL1
 queries use typed columnar storage. Named-table queries derive flat column
 types from the Arrow schema. Built-in workloads still use specialized
 operators; a catalog for multiple user-defined tables and generic nested
-execution are pending.
+execution are pending. Nested Parquet scans retain typed containers and support
+leaf projection, but are not yet connected to SQL expression evaluation.
 There is a repetition/definition-level round-trip example, but it is not
 connected to the query engine. Distributed storage and exchange, fault
 tolerance, transactions, database wire protocols, and durable spill recovery
