@@ -222,14 +222,8 @@ impl Parser {
                     } else {
                         Ok(Expr::Call(w, args))
                     }
-                } else if self.peek() == &Token::Dot {
-                    self.p += 1;
-                    match self.next() {
-                        Token::Word(column) => Ok(Expr::Column(format!("{w}.{column}"))),
-                        token => Err(format!("expected qualified column, got {token:?}")),
-                    }
                 } else {
-                    Ok(Expr::Column(w))
+                    Ok(Expr::Column(self.field_path(w)?))
                 }
             }
             Token::Number(n) => {

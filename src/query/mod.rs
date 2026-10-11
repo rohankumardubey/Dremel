@@ -4,6 +4,9 @@ mod benchmark;
 mod bind;
 pub use benchmark::run_columnar_bench_server;
 mod execute;
+mod nested;
+#[cfg(test)]
+mod nested_tests;
 #[cfg(test)]
 mod tests;
 
@@ -18,6 +21,7 @@ pub struct ColumnarQuery {
     query: crate::sql::Query,
     input_schema: SchemaRef,
     output_schema: SchemaRef,
+    column_paths: std::collections::HashMap<String, String>,
 }
 
 /// SQL result fields and rows in the engine's canonical scalar representation.
@@ -63,7 +67,9 @@ impl ColumnarQuery {
         if table.schema().fields() != self.input_schema.fields() {
             return Err("query input schema changed; prepare the query again".into());
         }
-        let (rows, _) = with_query_memory(limit_mb, || execute::execute(&self.query, table));
+        let (rows, _) = with_query_memory(limit_mb, || {
+            execute::execute(&self.query, table, &self.column_paths)
+        });
         Ok(QueryResult {
             schema: self.output_schema.clone(),
             rows: rows?,
@@ -86,7 +92,7 @@ pub fn run_columnar_query(
     }
     let started = Instant::now();
     let (rows, memory) = with_query_memory(options.query_memory_limit_mb, || {
-        execute::execute(&query.query, &table)
+        execute::execute(&query.query, &table, &query.column_paths)
     });
     let rows = rows?;
     let returned = rows.len();

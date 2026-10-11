@@ -54,6 +54,8 @@ pub enum Scalar {
     Float(f64),
     Bool(bool),
     Str(String),
+    Struct(Vec<(String, Scalar)>),
+    List(Vec<Scalar>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -65,6 +67,7 @@ pub(crate) enum ScalarKey {
     Float(u64),
     Bool(bool),
     Str(String),
+    Nested(String),
 }
 
 pub(crate) struct ExecutionControl {
@@ -157,6 +160,36 @@ impl Scalar {
             Self::Float(v) => format!("{{\"t\":\"f\",\"v\":{}}}", Self::json_float(*v)),
             Self::Bool(v) => format!("{{\"t\":\"b\",\"v\":{v}}}"),
             Self::Str(v) => format!("{{\"t\":\"s\",\"v\":{}}}", Self::json_string(v)),
+            Self::Struct(fields) => format!(
+                "{{\"t\":\"struct\",\"v\":{{{}}}}}",
+                fields
+                    .iter()
+                    .map(|(name, value)| format!("{}:{}", Self::json_string(name), value.json()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Self::List(values) => format!(
+                "{{\"t\":\"list\",\"v\":[{}]}}",
+                values.iter().map(Self::json).collect::<Vec<_>>().join(",")
+            ),
+        }
+    }
+
+    pub(crate) fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Str(text) => text.capacity(),
+            Self::Struct(fields) => {
+                fields.capacity() * std::mem::size_of::<(String, Scalar)>()
+                    + fields
+                        .iter()
+                        .map(|(name, value)| name.capacity() + value.heap_bytes())
+                        .sum::<usize>()
+            }
+            Self::List(values) => {
+                values.capacity() * std::mem::size_of::<Scalar>()
+                    + values.iter().map(Self::heap_bytes).sum::<usize>()
+            }
+            _ => 0,
         }
     }
 }

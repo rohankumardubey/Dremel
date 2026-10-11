@@ -79,6 +79,7 @@ pub(crate) fn scalar_hash_key(value: Scalar) -> Option<ScalarKey> {
         Scalar::Float(value) => Some(ScalarKey::Float(value.to_bits())),
         Scalar::Bool(value) => Some(ScalarKey::Bool(value)),
         Scalar::Str(value) => Some(ScalarKey::Str(value)),
+        value @ (Scalar::Struct(_) | Scalar::List(_)) => Some(ScalarKey::Nested(value.json())),
     }
 }
 
@@ -94,6 +95,7 @@ pub(crate) fn scalar_group_key_ref(value: &Scalar) -> ScalarKey {
         Scalar::Float(value) => ScalarKey::Float(value.to_bits()),
         Scalar::Bool(value) => ScalarKey::Bool(*value),
         Scalar::Str(value) => ScalarKey::Str(value.clone()),
+        value @ (Scalar::Struct(_) | Scalar::List(_)) => ScalarKey::Nested(value.json()),
     }
 }
 

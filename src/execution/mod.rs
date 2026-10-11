@@ -25,13 +25,7 @@ use spill::{execute_spilled_aggregate, should_spill_aggregate};
 pub(crate) fn row_bytes(row: &Vec<Scalar>) -> usize {
     std::mem::size_of::<Vec<Scalar>>()
         + row.capacity().saturating_mul(std::mem::size_of::<Scalar>())
-        + row
-            .iter()
-            .map(|value| match value {
-                Scalar::Str(text) => text.capacity(),
-                _ => 0,
-            })
-            .sum::<usize>()
+        + row.iter().map(Scalar::heap_bytes).sum::<usize>()
 }
 
 fn finish_group_rows(q: &Query, t: &Table, groups: GroupTable) -> Result<Vec<Vec<Scalar>>, String> {

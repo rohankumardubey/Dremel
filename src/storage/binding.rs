@@ -7,6 +7,7 @@ use std::ops::{Deref, DerefMut};
 pub(crate) struct Bindings {
     aliases: HashMap<String, String>,
     columns: HashMap<String, HashMap<String, SqlType>>,
+    arrow_types: HashMap<String, DataType>,
 }
 
 impl Deref for Bindings {
@@ -39,6 +40,7 @@ impl Bindings {
         Self {
             aliases: HashMap::new(),
             columns,
+            arrow_types: HashMap::new(),
         }
     }
 
@@ -50,15 +52,8 @@ impl Bindings {
             ));
         }
         let mut fields = HashMap::new();
-        for field in schema.fields() {
-            let column = field.name().to_ascii_lowercase();
-            if fields
-                .insert(column.clone(), arrow_sql_type(field.data_type()))
-                .is_some()
-            {
-                return Err(format!("ambiguous schema column {column}"));
-            }
-        }
+        let mut arrow_types = HashMap::new();
+        schema_fields(schema.fields(), "", &mut fields, &mut arrow_types)?;
         Ok(Self {
             aliases: [
                 (name.into(), name.into()),
@@ -66,6 +61,7 @@ impl Bindings {
             ]
             .into(),
             columns: [(name.into(), fields)].into(),
+            arrow_types,
         })
     }
 
@@ -82,6 +78,46 @@ impl Bindings {
             .copied()
             .unwrap_or(SqlType::Unknown)
     }
+
+    pub(crate) fn arrow_type(&self, column: &str) -> Option<&DataType> {
+        self.arrow_types.get(column)
+    }
+}
+
+fn schema_fields(
+    input: &arrow::datatypes::Fields,
+    prefix: &str,
+    types: &mut HashMap<String, SqlType>,
+    arrow_types: &mut HashMap<String, DataType>,
+) -> Result<(), String> {
+    for field in input {
+        let name = field.name().to_ascii_lowercase();
+        let mut chars = name.chars();
+        let valid = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid {
+            // Unaddressable fields can remain in unreferenced input containers.
+            continue;
+        }
+        let path = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}.{name}")
+        };
+        if types
+            .insert(path.clone(), arrow_sql_type(field.data_type()))
+            .is_some()
+        {
+            return Err(format!("ambiguous schema column {path}"));
+        }
+        arrow_types.insert(path.clone(), field.data_type().clone());
+        if let DataType::Struct(children) = field.data_type() {
+            schema_fields(children, &path, types, arrow_types)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn arrow_sql_type(data_type: &DataType) -> SqlType {
@@ -105,6 +141,8 @@ pub(crate) fn arrow_sql_type(data_type: &DataType) -> SqlType {
             _,
         ) => SqlType::Timestamp,
         DataType::Dictionary(_, value) => arrow_sql_type(value),
+        DataType::Struct(_) => SqlType::Struct,
+        DataType::List(_) | DataType::LargeList(_) | DataType::FixedSizeList(_, _) => SqlType::List,
         _ => SqlType::Unknown,
     }
 }
@@ -167,25 +205,41 @@ pub(crate) fn resolve_column(
     column: &str,
     bindings: &Bindings,
 ) -> Result<(String, String), String> {
-    if let Some((qualifier, name)) = column.split_once('.') {
-        let table = bindings
-            .get(qualifier)
-            .ok_or_else(|| format!("unknown table or alias {qualifier}"))?;
-        if !bindings.has_column(table, name) {
-            return Err(format!("unknown column {column}"));
-        }
-        return Ok((table.clone(), name.into()));
-    }
-    let mut tables: Vec<_> = bindings
+    let mut candidates: Vec<_> = bindings
         .values()
         .filter(|table| bindings.has_column(table, column))
-        .cloned()
+        .map(|table| (table.clone(), column.to_string()))
         .collect();
-    tables.sort();
-    tables.dedup();
-    match tables.as_slice() {
-        [] => Err(format!("unknown column {column}")),
-        [table] => Ok((table.clone(), column.into())),
+    if let Some((qualifier, name)) = column.split_once('.')
+        && let Some(table) = bindings.get(qualifier)
+        && bindings.has_column(table, name)
+    {
+        candidates.push((table.clone(), name.into()));
+    }
+    candidates.sort();
+    candidates.dedup();
+    match candidates.as_slice() {
+        [] => {
+            let mut prefix = String::new();
+            for segment in column.split('.') {
+                if !prefix.is_empty() {
+                    prefix.push('.');
+                }
+                prefix.push_str(segment);
+                let unqualified = prefix
+                    .split_once('.')
+                    .filter(|(qualifier, _)| bindings.contains_key(*qualifier))
+                    .map_or(prefix.as_str(), |(_, path)| path);
+                if bindings
+                    .arrow_type(unqualified)
+                    .is_some_and(|kind| arrow_sql_type(kind) == SqlType::List)
+                {
+                    return Err(format!("{column}: LIST traversal requires UNNEST"));
+                }
+            }
+            Err(format!("unknown column {column}"))
+        }
+        [resolved] => Ok(resolved.clone()),
         _ => Err(format!("ambiguous column {column}")),
     }
 }
@@ -201,6 +255,8 @@ pub(crate) enum SqlType {
     Date,
     Timestamp,
     Interval,
+    Struct,
+    List,
     Unknown,
 }
 
@@ -317,8 +373,9 @@ pub(crate) fn infer_type(expression: &Expr, bindings: &Bindings) -> Result<SqlTy
                 "count" => Ok(SqlType::Int),
                 "avg" => Ok(SqlType::Double),
                 "sum" | "min" | "max" => Ok(argument),
+                "coalesce" => Ok(argument),
                 "lower" | "upper" | "substring" => Ok(SqlType::String),
-                "length" => Ok(SqlType::Int),
+                "length" | "cardinality" => Ok(SqlType::Int),
                 "abs" => numeric_type(argument)
                     .then_some(argument)
                     .ok_or_else(|| "ABS requires a numeric operand".into()),
@@ -349,7 +406,7 @@ pub(crate) fn infer_type(expression: &Expr, bindings: &Bindings) -> Result<SqlTy
                 "timestamp" => Ok(SqlType::Timestamp),
                 "interval" => Ok(SqlType::Interval),
                 "date_trunc" => Ok(types.get(1).copied().unwrap_or(SqlType::Unknown)),
-                "extract" | "length" => Ok(SqlType::Int),
+                "extract" | "length" | "cardinality" => Ok(SqlType::Int),
                 _ => Ok(SqlType::Unknown),
             }
         }

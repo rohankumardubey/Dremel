@@ -349,7 +349,7 @@ fn binds_case_insensitive_names_and_rejects_ambiguous_schema() {
 }
 
 #[test]
-fn unreferenced_nested_fields_are_retained_but_not_evaluated() {
+fn nested_fields_preserve_null_and_empty_collections() {
     let list = ListArray::from_iter_primitive::<Int32Type, _, _>([
         Some(vec![Some(1)]),
         Some(vec![]),
@@ -366,15 +366,21 @@ fn unreferenced_nested_fields_are_retained_but_not_evaluated() {
         count.execute(&table).unwrap().rows,
         vec![vec![Scalar::Int(3)]]
     );
-    assert!(
+    assert_eq!(
         ColumnarQuery::prepare(
             "readings",
             table.schema().clone(),
             "SELECT samples FROM readings"
         )
-        .err()
         .unwrap()
-        .contains("nested")
+        .execute(&table)
+        .unwrap()
+        .rows,
+        vec![
+            vec![Scalar::List(vec![Scalar::Int(1)])],
+            vec![Scalar::List(vec![])],
+            vec![Scalar::Null]
+        ]
     );
 }
 

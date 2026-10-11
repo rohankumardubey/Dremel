@@ -79,15 +79,21 @@ impl Parser {
             Token::Word(value) => value,
             token => return Err(format!("expected identifier, got {token:?}")),
         };
-        if self.peek() == &Token::Dot {
+        self.field_path(first)
+    }
+
+    pub(crate) fn field_path(&mut self, mut path: String) -> Result<String, String> {
+        while self.peek() == &Token::Dot {
             self.p += 1;
             match self.next() {
-                Token::Word(second) => Ok(format!("{first}.{second}")),
-                token => Err(format!("expected qualified identifier, got {token:?}")),
+                Token::Word(next) => {
+                    path.push('.');
+                    path.push_str(&next);
+                }
+                token => return Err(format!("expected field identifier, got {token:?}")),
             }
-        } else {
-            Ok(first)
         }
+        Ok(path)
     }
     pub(crate) fn window(&mut self, name: String, args: Vec<Expr>) -> Result<Expr, String> {
         if self.next() != Token::LParen {

@@ -1,0 +1,20 @@
+[
+  {"query_id":"NS001","category":"group_struct_leaf","sql":"SELECT profile.city AS city, COUNT(*) FROM records GROUP BY profile.city ORDER BY city ASC NULLS FIRST","types":["s","i"]},
+  {"query_id":"NS002","category":"deep_leaf_aggregates","sql":"SELECT SUM(profile.detail.zip), COUNT(profile.detail.zip), AVG(profile.detail.zip) FROM records","types":["i","i","f"]},
+  {"query_id":"NS003","category":"nested_arithmetic_filter","sql":"SELECT record_id, COALESCE(profile.detail.zip, 0) + 1, LOWER(profile.city) FROM records WHERE profile.detail.zip BETWEEN 1 AND 99999 ORDER BY record_id LIMIT 25","types":["i","i","s"]},
+  {"query_id":"NS004","category":"qualified_deep_paths","sql":"SELECT r.record_id, r.profile.city, r.profile.detail.zip FROM records r WHERE r.profile.city = 'NY' ORDER BY r.record_id LIMIT 25","types":["i","s","i"]},
+  {"query_id":"NS005","category":"parent_null_filter","sql":"SELECT record_id, profile.detail.zip FROM records WHERE profile IS NULL OR profile.detail IS NULL ORDER BY record_id LIMIT 25","types":["i","i"]},
+  {"query_id":"NS006","category":"three_valued_leaf_logic","sql":"SELECT COUNT(*) FROM records WHERE NOT (profile.detail.zip > 100000) AND profile.city IN ('LA', 'NY')","types":["i"]},
+  {"query_id":"NS007","category":"deep_group_having","sql":"SELECT profile.detail.zip AS zip, SUM(record_id), COUNT(*) FROM records GROUP BY profile.detail.zip HAVING COUNT(*) > 0 ORDER BY zip ASC NULLS LAST","types":["i","i","i"]},
+  {"query_id":"NS008","category":"leaf_distinct","sql":"SELECT DISTINCT profile.detail.zip AS zip FROM records ORDER BY zip ASC NULLS FIRST","types":["i"]},
+  {"query_id":"NS009","category":"nested_order_offset","sql":"SELECT record_id, profile.detail.zip AS zip FROM records ORDER BY zip DESC NULLS LAST, record_id LIMIT 25 OFFSET 5","types":["i","i"]},
+  {"query_id":"NS010","category":"scalar_case_coalesce","sql":"SELECT record_id, CASE WHEN profile.city IS NULL THEN 'missing' ELSE UPPER(profile.city) END, COALESCE(profile.detail.zip, -1) FROM records ORDER BY record_id LIMIT 25","types":["i","s","i"]},
+  {"query_id":"NS011","category":"list_cardinality","sql":"SELECT record_id, CARDINALITY(samples) FROM records WHERE CARDINALITY(samples) >= 1 ORDER BY record_id LIMIT 25","types":["i","i"]},
+  {"query_id":"NS012","category":"container_presence_count","sql":"SELECT COUNT(profile), COUNT(profile.detail), COUNT(samples), COUNT(*) FROM records","types":["i","i","i","i"]},
+  {"query_id":"NS013","category":"whole_struct_projection","sql":"SELECT record_id, profile FROM records ORDER BY record_id LIMIT 25","oracle":"struct"},
+  {"query_id":"NS014","category":"repeated_typed_values","sql":"SELECT record_id, items, samples, matrix, large_values FROM records ORDER BY record_id LIMIT 25","oracle":"lists"},
+  {"query_id":"NS015","category":"container_null_predicates","sql":"SELECT record_id, profile IS NULL, profile.detail IS NULL, samples IS NULL FROM records ORDER BY record_id LIMIT 25","types":["i","b","b","b"]},
+  {"query_id":"NS016","category":"nested_case_coalesce","sql":"SELECT record_id, CASE WHEN record_id > 2 THEN samples ELSE NULL END, COALESCE(NULL, profile) FROM records ORDER BY record_id LIMIT 25","oracle":"case"},
+  {"query_id":"NS017","category":"nested_star","sql":"SELECT * FROM records LIMIT 25","oracle":"star"},
+  {"query_id":"NS018","category":"empty_nested_result","sql":"SELECT record_id, profile, samples FROM records WHERE record_id < 0 ORDER BY record_id","oracle":"empty"}
+]

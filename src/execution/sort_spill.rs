@@ -61,6 +61,9 @@ fn encode_row(row: &[Scalar]) -> Result<Vec<u8>, String> {
                 push_u32(&mut payload, value.len())?;
                 payload.extend_from_slice(value.as_bytes());
             }
+            Scalar::Struct(_) | Scalar::List(_) => {
+                return Err("external sort does not support nested values".into());
+            }
         }
     }
     let mut encoded = Vec::with_capacity(payload.len() + 4);

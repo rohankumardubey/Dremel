@@ -4,7 +4,7 @@ use crate::relational::{
     scalar_group_key, update_scalar_aggregate,
 };
 use crate::sql::*;
-use crate::storage::{ColumnarTable, PrimitiveBatch};
+use crate::storage::{ColumnarTable, ValueBatch};
 use crate::types::{
     Scalar, ScalarKey, account_query_memory, current_query_memory, execution_cancelled,
 };
@@ -27,8 +27,12 @@ fn state_strings(states: &[AggState]) -> usize {
         .sum()
 }
 
-pub(super) fn execute(query: &Query, table: &ColumnarTable) -> Result<Vec<Vec<Scalar>>, String> {
-    let batches = PrimitiveBatch::from_table(table, &query.columns)?;
+pub(super) fn execute(
+    query: &Query,
+    table: &ColumnarTable,
+    paths: &HashMap<String, String>,
+) -> Result<Vec<Vec<Scalar>>, String> {
+    let batches = ValueBatch::from_table(table, paths)?;
     let aggregate = query.select.iter().any(|item| contains_agg(&item.expr))
         || query.having.as_ref().is_some_and(contains_agg)
         || !query.group_by.is_empty();
