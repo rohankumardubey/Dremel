@@ -76,6 +76,9 @@ pub(crate) fn literal_expression(value: Scalar) -> Expr {
         Scalar::Float(value) => Expr::Float(value),
         Scalar::Bool(value) => Expr::Bool(value),
         Scalar::Str(value) => Expr::String(value),
+        Scalar::Struct(_) | Scalar::List(_) => {
+            unreachable!("nested values are not scalar SQL literals")
+        }
     }
 }
 

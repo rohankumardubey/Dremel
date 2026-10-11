@@ -179,6 +179,10 @@ pub(crate) fn temporal_components(value: &Scalar) -> Option<(i64, i64, i64, i64,
 
 pub(crate) fn eval_values(name: &str, values: Vec<Scalar>) -> Scalar {
     match name {
+        "cardinality" if values.len() == 1 => match &values[0] {
+            Scalar::List(items) => Scalar::Int(items.len() as i64),
+            _ => Scalar::Null,
+        },
         "coalesce" => values
             .into_iter()
             .find(|value| !matches!(value, Scalar::Null))
@@ -222,6 +226,7 @@ pub(crate) fn eval_values(name: &str, values: Vec<Scalar>) -> Scalar {
                             Scalar::Float(number) => number.to_string(),
                             Scalar::Bool(boolean) => boolean.to_string(),
                             Scalar::Null => unreachable!(),
+                            Scalar::Struct(_) | Scalar::List(_) => value.json(),
                         })
                         .collect(),
                 )
@@ -577,6 +582,9 @@ pub(crate) fn scalar_expression(value: Scalar) -> Expr {
         Scalar::Float(value) => Expr::Float(value),
         Scalar::Bool(value) => Expr::Bool(value),
         Scalar::Str(value) => Expr::String(value),
+        Scalar::Struct(_) | Scalar::List(_) => {
+            unreachable!("nested values are not scalar SQL literals")
+        }
     }
 }
 

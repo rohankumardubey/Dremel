@@ -1,4 +1,5 @@
 use super::ColumnarQuery;
+use super::nested::{canonical_type, collect_paths, expression_type, reject_nested};
 use crate::relational::output_columns;
 use crate::sql::*;
 use crate::storage::{
@@ -50,8 +51,26 @@ pub(super) fn prepare(
     query.select = select;
     query.plan()?;
     bind_query_with(&query, &bindings)?;
+    let mut paths = std::collections::BTreeSet::new();
+    for item in &query.select {
+        collect_paths(&item.expr, &mut paths);
+    }
+    if let Some(filter) = &query.filter {
+        collect_paths(filter, &mut paths);
+    }
+    if let Some(having) = &query.having {
+        collect_paths(having, &mut paths);
+    }
+    paths.extend(query.group_by.iter().cloned());
+    query.columns = paths.into_iter().collect();
     for item in &query.select {
         validate(&item.expr, &bindings, false, None)?;
+        if query.distinct {
+            reject_nested(&item.expr, &bindings)?;
+        }
+    }
+    for group in &query.group_by {
+        reject_nested(&Expr::Column(group.clone()), &bindings)?;
     }
     if let Some(filter) = &query.filter {
         if contains_agg(filter) {
@@ -80,6 +99,11 @@ pub(super) fn prepare(
                 order.key
             ));
         }
+        let item = query.select.iter().find(|item| {
+            item.alias.as_ref() == Some(&order.key)
+                || matches!(&item.expr, Expr::Column(column) if column == &order.key || column.rsplit('.').next() == Some(order.key.as_str()))
+        }).expect("one matching order expression");
+        reject_nested(&item.expr, &bindings)?;
     }
     let fields = query
         .select
@@ -88,7 +112,7 @@ pub(super) fn prepare(
         .map(|(item, name)| {
             Ok(Field::new(
                 name,
-                output_type(infer_type(&item.expr, &bindings)?)?,
+                expression_type(&item.expr, &bindings)?,
                 true,
             ))
         })
@@ -124,6 +148,11 @@ pub(super) fn prepare(
         query.physical.push("LimitExec".into());
     }
     Ok(ColumnarQuery {
+        column_paths: query
+            .columns
+            .iter()
+            .map(|column| Ok((column.clone(), resolve_column(column, &bindings)?.1)))
+            .collect::<Result<_, String>>()?,
         query,
         input_schema: schema,
         output_schema: Arc::new(Schema::new(fields)),
@@ -138,7 +167,7 @@ fn identifier(name: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-fn output_type(kind: SqlType) -> Result<DataType, String> {
+pub(super) fn output_type(kind: SqlType) -> Result<DataType, String> {
     Ok(match kind {
         SqlType::Null => DataType::Null,
         SqlType::Bool => DataType::Boolean,
@@ -148,7 +177,9 @@ fn output_type(kind: SqlType) -> Result<DataType, String> {
         SqlType::String => DataType::Utf8,
         SqlType::Date => DataType::Date32,
         SqlType::Timestamp => DataType::Timestamp(TimeUnit::Second, None),
-        SqlType::Unknown => return Err("expression has an unsupported SQL type".into()),
+        SqlType::Unknown | SqlType::Struct | SqlType::List => {
+            return Err("expression has an unsupported SQL type".into());
+        }
     })
 }
 
@@ -172,10 +203,9 @@ fn validate(
                 return Err(format!("HAVING column {column} must be grouped"));
             }
             if bindings.column_type(&table, &name) == SqlType::Unknown {
-                return Err(format!(
-                    "column {column} has an unsupported SQL type; nested fields require nested SQL support"
-                ));
+                return Err(format!("column {column} has an unsupported SQL type"));
             }
+            canonical_type(bindings.arrow_type(&name).ok_or("missing Arrow type")?)?;
         }
         Expr::Func(name, argument) => validate_function(
             name,
@@ -192,17 +222,25 @@ fn validate(
             groups,
         )?,
         Expr::Cast(value, data_type) => {
+            reject_nested(value, bindings)?;
             if data_type.starts_with("decimal(") && data_type != "decimal(18,2)" {
                 return Err("only DECIMAL(18,2) is supported".into());
             }
             child(value)?;
         }
-        Expr::Unary(_, value) | Expr::IsNull(value, _) => child(value)?,
+        Expr::Unary(_, value) => {
+            reject_nested(value, bindings)?;
+            child(value)?;
+        }
+        Expr::IsNull(value, _) => child(value)?,
         Expr::Binary(_, left, right) | Expr::Like(left, right, _) => {
+            reject_nested(left, bindings)?;
+            reject_nested(right, bindings)?;
             child(left)?;
             child(right)?;
         }
         Expr::Case(branches, fallback) => {
+            expression_type(expression, bindings)?;
             for (condition, value) in branches {
                 child(condition)?;
                 child(value)?;
@@ -210,12 +248,17 @@ fn validate(
             child(fallback)?;
         }
         Expr::InList(value, candidates, _) => {
+            reject_nested(value, bindings)?;
             child(value)?;
             for candidate in candidates {
+                reject_nested(candidate, bindings)?;
                 child(candidate)?;
             }
         }
         Expr::Between(value, low, high, _) => {
+            for value in [value, low, high] {
+                reject_nested(value, bindings)?;
+            }
             child(value)?;
             child(low)?;
             child(high)?;
@@ -245,7 +288,7 @@ fn validate_function(
     let arity = arguments.len();
     let valid = match name {
         "count" | "sum" | "avg" | "min" | "max" | "lower" | "upper" | "length" | "abs" | "date"
-        | "timestamp" | "interval" => arity == 1,
+        | "timestamp" | "interval" | "cardinality" => arity == 1,
         "nullif" | "extract" | "date_trunc" => arity == 2,
         "substring" => (2..=3).contains(&arity),
         "concat" | "coalesce" => arity > 0,
@@ -255,12 +298,27 @@ fn validate_function(
         return Err(format!("invalid argument count for {name}"));
     }
     for argument in arguments {
+        if !["count", "coalesce", "cardinality"].contains(&name) {
+            reject_nested(argument, bindings)?;
+        }
         if matches!(argument, Expr::Star) && name != "count" {
             return Err(format!("{name}(*) is unsupported"));
         }
         validate(argument, bindings, inside_aggregate || aggregate, groups)?;
     }
     let kind = infer_type(arguments[0], bindings)?;
+    if name == "cardinality" && !matches!(kind, SqlType::List | SqlType::Null) {
+        return Err("CARDINALITY requires a LIST argument".into());
+    }
+    if name == "coalesce" {
+        expression_type(
+            &Expr::Call(
+                name.into(),
+                arguments.iter().map(|arg| (*arg).clone()).collect(),
+            ),
+            bindings,
+        )?;
+    }
     if ["sum", "avg", "abs"].contains(&name) && !numeric_type(kind) && kind != SqlType::Null {
         return Err(format!("{name} requires a numeric argument"));
     }

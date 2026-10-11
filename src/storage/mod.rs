@@ -13,13 +13,14 @@ mod interoperable;
 mod native;
 mod nested_scan;
 mod primitive;
+mod values;
 pub(crate) use binding::*;
 pub use columnar::ColumnarTable;
 pub(crate) use dimension::DimensionTable;
 use event_columnar::EventColumnar;
 pub(crate) use interoperable::ParquetScanMetrics;
 pub use nested_scan::{ParquetScan, ParquetScanOptions, ParquetScanPlan};
-pub(crate) use primitive::PrimitiveBatch;
+pub(crate) use values::ValueBatch;
 
 #[derive(Clone, Default)]
 pub(crate) struct Dictionary {

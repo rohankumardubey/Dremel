@@ -1,5 +1,9 @@
 # Nested Parquet scans
 
+For SQL path binding and typed value expressions, see
+[nested SQL](sql-support.md#nested-sql). The scan API below is independent of
+SQL planning and supports storage projection through LIST element containers.
+
 `dremel scan` reads projected Parquet columns in Arrow batches using the
 official Apache Parquet Rust implementation. It supports nested STRUCT,
 LIST, LARGE_LIST, and repeated lists without assembling every record into
@@ -106,5 +110,5 @@ Results and an interactive report are written under `results/nested/`; the
 terminal prints the report URL. The full runner enables this suite by default;
 set `NESTED_PARQUET=0` to disable it. Benchmarks remain manual in CI.
 
-Nested SQL field binding, UNNEST, nested joins/aggregates, automatic partition
-pruning, and a complete query memory budget remain separate work.
+UNNEST, container joins/aggregates, automatic partition pruning, SQL-integrated
+projected scans, and a complete query memory budget remain separate work.

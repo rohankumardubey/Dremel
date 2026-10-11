@@ -64,8 +64,8 @@ INT64, FLOAT32/FLOAT64, UTF8/LARGEUTF8/UTF8VIEW, primitive dictionaries,
 DECIMAL128 with scale 2, DATE32/DATE64, and timestamps with whole-second values.
 Decimal values must fit the engine's DECIMAL(18,2) range. DATE64 values must
 represent whole days. Subsecond timestamps and out-of-range numeric values
-are rejected rather than truncated. Nested columns can remain in the input
-schema when unreferenced; selecting them requires future nested SQL support.
+are rejected rather than truncated. STRUCT fields and LIST containers are also
+supported; see [nested SQL](#nested-sql) for path and value semantics.
 
 Execution is serial and scans typed Arrow batches without first converting
 the input into scalar rows. The file is loaded eagerly; joins, windows, CTEs,
@@ -108,6 +108,84 @@ report. Preparation, startup loading, and prepared execution are separate:
 The full benchmark runner enables this suite by default. Set `SCHEMA_SQL=0`
 to disable it. The built-in controls use one thread and the same logical
 values; their specialized execution paths differ from the named-table path.
+
+## Nested SQL
+
+Rust named-table queries resolve arbitrary-depth STRUCT paths. Paths may be
+unqualified (`profile.detail.zip`), table-qualified
+(`records.profile.detail.zip`), or alias-qualified
+(`r.profile.detail.zip`). Field names are case insensitive. If a path could
+mean both a table qualification and an unqualified STRUCT path, preparation
+rejects it as ambiguous; change the alias or qualify it with the table name.
+Unknown children and duplicate sibling names differing only by case are
+rejected. Quoted identifiers and escaping dots within field names are not
+implemented.
+
+```bash
+./target/release/dremel query --data records.parquet --table records \
+  --sql "SELECT r.profile.city, r.profile.detail.zip, CARDINALITY(r.samples) FROM records r"
+```
+
+A null ancestor makes the field path null, even if its child buffer contains
+a value. Primitive leaves support the existing scalar expressions, filters,
+aggregates, grouping, ordering, and DISTINCT. Selecting one field evaluates
+only that field, not its siblings; input files are still loaded eagerly.
+This does not imply SQL Parquet projection, pruning, or streaming.
+
+Whole STRUCT, LIST, LARGE_LIST, and FIXED_SIZE_LIST values can be projected,
+including nested lists and lists of structs. Their leaves use the same
+primitive types and lossless normalization rules as flat SQL. Unsupported
+leaf types, MAP, UNION, run-end encoding, list-view arrays, and nested
+dictionary values are rejected when referenced. Primitive dictionaries are
+decoded by Apache Arrow. A null struct is distinct from a valid struct whose
+fields are all null. Null lists, empty lists, null elements, and element order
+remain distinct. Values hidden beneath null parents or outside a sliced list's
+visible offsets are not treated as visible values during normalization.
+
+`IS NULL` tests the outer container validity, not whether all its children are
+null. `COUNT(container)` counts non-null containers, including empty lists.
+`CARDINALITY(list)` returns its element count, including null elements; it
+returns null for a null list. `CASE` and `COALESCE` accept container values
+only when non-null branches have identical normalized Arrow field layouts.
+Container comparisons, casts, MIN/MAX/SUM/AVG, DISTINCT, grouping, and explicit
+container sort keys are rejected. Ordering by a projected primitive key is
+allowed alongside container projections. Container JSON is used only as a
+deterministic tie-break for equal explicit sort keys, not as SQL ordering.
+
+The Rust `Scalar` API adds `Struct(Vec<(String, Scalar)>)` and
+`List(Vec<Scalar>)`. The result schema retains container shapes and field names,
+with normalized primitive leaf types. Typed NDJSON is recursive:
+
+```json
+[{"t":"struct","v":{"city":{"t":"s","v":"NY"}}},{"t":"list","v":[{"t":"i","v":1},null]}]
+```
+
+The `struct` payload is an object with original Arrow field names; a `list`
+payload is an ordered array. Nulls remain JSON null at every depth. As with
+flat queries, date values use ISO strings and timestamps use epoch seconds.
+Query workspace accounting includes normalized leaf buffers, combined ancestor
+validity, list visibility workspace, and recursive result allocations. It is
+an estimate, not a hard allocation or RSS limit; temporary expression values
+are not comprehensively budgeted. This path remains serial and materialized.
+
+Nested SQL does not implicitly traverse a list, flatten records, or perform
+UNNEST. `items.price` is valid as a storage projection but is not a scalar SQL
+path. Repeated-field relational semantics and list element access remain future
+work. The C++ reference still supports only the fixed-schema SQL workloads.
+
+```bash
+.venv/bin/python benchmarks/scripts/run_nested_sql_benchmark.py --warmup 3 --iterations 20
+```
+
+The suite validates 18 queries over Arrow and Parquet against independent
+SQLite null-aware scalar paths and PyArrow typed values. Prepared execution
+includes normalization and result materialization; loading, preparation, and
+JSON encoding are outside the timed interval. Eligible queries also run over
+equivalent flat Rust values, with ancestor nulls already applied and matching
+input formats, batch sizes, row groups, and primitive widths. Container
+queries have no flat timing control. These measurements are not a Rust/C++
+language comparison. The suite is enabled by default by the full runner;
+set `NESTED_SQL=0` to disable it. Results include an interactive HTML report.
 
 ## Parquet execution
 
