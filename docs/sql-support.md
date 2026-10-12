@@ -68,7 +68,7 @@ are rejected rather than truncated. STRUCT fields and LIST containers are also
 supported; see [nested SQL](#nested-sql) for path and value semantics.
 
 Execution is serial and scans typed Arrow batches without first converting
-the input into scalar rows. The file is loaded eagerly; joins, windows, CTEs,
+the input into scalar rows. The file is loaded eagerly; ordinary table joins, windows, CTEs,
 subqueries, UNION, spill, and direct/streaming Parquet flags are unsupported
 in this mode. `--memory-limit-mb` checks resident input after loading, while
 `--query-memory-limit-mb` accounts for column normalization, aggregation,
@@ -168,10 +168,10 @@ validity, list visibility workspace, and recursive result allocations. It is
 an estimate, not a hard allocation or RSS limit; temporary expression values
 are not comprehensively budgeted. This path remains serial and materialized.
 
-Nested SQL does not implicitly traverse a list, flatten records, or perform
-UNNEST. `items.price` is valid as a storage projection but is not a scalar SQL
-path. Repeated-field relational semantics and list element access remain future
-work. The C++ reference still supports only the fixed-schema SQL workloads.
+Nested SQL does not implicitly traverse a list or flatten records.
+`items.price` is valid as a storage projection but is not a scalar SQL path;
+use explicit [UNNEST](#unnest) for repeated fields. The C++ reference still
+supports only the fixed-schema SQL workloads.
 
 ```bash
 .venv/bin/python benchmarks/scripts/run_nested_sql_benchmark.py --warmup 3 --iterations 20
@@ -186,6 +186,79 @@ input formats, batch sizes, row groups, and primitive widths. Container
 queries have no flat timing control. These measurements are not a Rust/C++
 language comparison. The suite is enabled by default by the full runner;
 set `NESTED_SQL=0` to disable it. Results include an interactive HTML report.
+
+## UNNEST
+
+Rust named-table queries expand LIST, LARGE_LIST, and FIXED_SIZE_LIST fields
+through correlated `CROSS JOIN`, comma joins, `INNER JOIN ... ON`, and
+`LEFT JOIN ... ON`. The argument must be one field path from the input table
+or an earlier UNNEST relation. `LATERAL` is optional. A relation alias is
+required; its default element column is `value`, and `WITH ORDINALITY` adds
+`ordinality`. Explicit column aliases use `AS u(element)` or
+`AS u(element, position)` with ordinality.
+
+```sql
+SELECT r.record_id, item.value.price, tag.value, tag.ordinality
+FROM records r
+CROSS JOIN UNNEST(r.items) AS item
+LEFT JOIN UNNEST(item.value.tags) WITH ORDINALITY AS tag ON TRUE
+ORDER BY record_id, ordinality
+```
+
+Each parent list is visited in storage order. Ordinality starts at one for
+each parent, includes null elements, and is assigned before ON or WHERE
+filtering. Use explicit ORDER BY on projected parent keys and ordinalities
+when final result order matters. Null lists and empty lists produce zero
+rows in cross/inner joins. A null element produces one row with a null
+element and a real ordinality. A left join produces one null-extended row
+with null ordinality if there are no elements satisfying ON, including
+null and empty lists. WHERE runs after join preservation and may remove it.
+These join and ordinality rules follow the conventional
+[LATERAL table-function model](https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-TABLEFUNCTIONS).
+
+Elements can be primitives, whole typed STRUCT/LIST values, STRUCT leaf
+paths such as `u.value.price`, or sources for a later UNNEST. Separate lists
+form a Cartesian product, not a positional zip. Chained lists preserve
+their own parent and ordinal domains. SELECT * includes the parent fields,
+each element column, and each requested ordinality. Ordinary name binding
+and ambiguity checks apply; use qualified columns when names repeat.
+ON cannot reference a later stage, contain aggregates, or use a non-boolean
+expression. RIGHT/FULL joins, multiple arguments in one UNNEST, array
+indexing, arbitrary list expressions, standalone FROM UNNEST, and more than
+32 stages are unsupported.
+
+Scalar filters, aggregates, grouping, HAVING, DISTINCT, ordering, LIMIT,
+and OFFSET work over expanded primitive values. Existing container-operation
+restrictions still apply. COUNT(*) counts expanded rows, not source records.
+Execution retains Arrow arrays and a cursor of parent/element indices; it
+does not build an intermediate copy of each parent record. Only requested
+leaf arrays are normalized; unrelated element siblings are not evaluated.
+Null ancestor and sliced-list visibility masks apply before normalization.
+EXPLAIN shows `CorrelatedUnnestExec` with `parent_copy=false`.
+Named-table `--stats` counts distinct top-level input fields accessed by
+execution in `columns_scanned`, including list sources but not generated
+ordinalities. It is not a Parquet decoding or selected-byte metric: loading
+still reads the entire file.
+
+Input remains eager, execution serial, and results materialized. Cursor,
+visibility, normalization, group, and result allocations are estimated in
+the query budget; this is not a hard allocator/RSS limit. The input load is
+excluded from that budget, and no SQL Parquet projection or streaming is
+implied.
+
+```bash
+.venv/bin/python benchmarks/scripts/run_unnest_benchmark.py --warmup 3 --iterations 20
+```
+
+The suite checks 22 queries in both Arrow and Parquet against independent
+PyArrow row expansion and SQLite, including typed container elements.
+It measures prepared execution and compares eligible queries with Rust over
+equivalent pre-expanded scalar rows. Expansion and loading are outside flat
+control timing, so ratios do not measure end-to-end flattening cost. Flat
+row counts differ from input record counts, and count-only controls can use
+metadata while UNNEST visits offsets. C++ does not implement generic UNNEST;
+this is not a language comparison. Both standalone and full benchmark runs
+generate an interactive HTML report. Set `UNNEST=0` to skip this suite.
 
 ## Parquet execution
 

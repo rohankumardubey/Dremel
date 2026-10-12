@@ -42,6 +42,12 @@ impl Query {
         let mut estimated_rows = table_rows(&self.from.name);
         let materialized_joins = !self.ctes.is_empty();
         for join in &self.joins {
+            if let Some(unnest) = &join.unnest {
+                self.logical
+                    .push(format!("{:?}Unnest({})", join.kind, unnest.path));
+                self.physical.push("UnnestExec".into());
+                continue;
+            }
             self.logical
                 .push(format!("{:?}Join({})", join.kind, join.table.name));
             let equi = matches!(

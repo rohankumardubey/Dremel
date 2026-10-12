@@ -32,27 +32,7 @@ impl ValueBatch {
                     if execution_cancelled() {
                         return Err("query cancelled during column normalization".into());
                     }
-                    let mut segments = path.split('.');
-                    let root = segments.next().ok_or("empty column path")?;
-                    let index = batch
-                        .schema()
-                        .fields()
-                        .iter()
-                        .position(|field| field.name().eq_ignore_ascii_case(root))
-                        .ok_or_else(|| format!("unknown column {path}"))?;
-                    let mut array = batch.column(index).clone();
-                    for segment in segments {
-                        let structure = array
-                            .as_any()
-                            .downcast_ref::<StructArray>()
-                            .ok_or_else(|| format!("{path}: LIST traversal requires UNNEST"))?;
-                        let index = structure
-                            .fields()
-                            .iter()
-                            .position(|field| field.name().eq_ignore_ascii_case(segment))
-                            .ok_or_else(|| format!("unknown field {path}"))?;
-                        array = with_parent_nulls(structure.column(index).clone(), array.nulls())?;
-                    }
+                    let array = super::project_path(batch, path)?;
                     columns.insert(expression.clone(), ColumnValue::new(path, array)?);
                 }
                 Ok(Self {
@@ -68,7 +48,10 @@ impl ValueBatch {
     }
 }
 
-fn with_parent_nulls(array: ArrayRef, parent: Option<&NullBuffer>) -> Result<ArrayRef, String> {
+pub(super) fn with_parent_nulls(
+    array: ArrayRef,
+    parent: Option<&NullBuffer>,
+) -> Result<ArrayRef, String> {
     let Some(parent) = parent else {
         return Ok(array);
     };
@@ -85,7 +68,7 @@ fn with_parent_nulls(array: ArrayRef, parent: Option<&NullBuffer>) -> Result<Arr
     Ok(make_array(data))
 }
 
-fn list_range(array: &ArrayRef, row: usize) -> std::ops::Range<usize> {
+pub(crate) fn list_range(array: &ArrayRef, row: usize) -> std::ops::Range<usize> {
     if let Some(list) = array.as_any().downcast_ref::<ListArray>() {
         let offsets = list.value_offsets();
         offsets[row] as usize..offsets[row + 1] as usize

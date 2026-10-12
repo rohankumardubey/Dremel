@@ -20,6 +20,7 @@ SQL_V1="${SQL_V1:-1}"
 SCHEMA_SQL="${SCHEMA_SQL:-1}"
 NESTED_PARQUET="${NESTED_PARQUET:-1}"
 NESTED_SQL="${NESTED_SQL:-1}"
+UNNEST="${UNNEST:-1}"
 OPTIMIZER="${OPTIMIZER:-1}"
 CONCURRENCY="${CONCURRENCY:-1}"
 PARQUET_CONCURRENCY="${PARQUET_CONCURRENCY:-1}"
@@ -181,6 +182,11 @@ if [[ "$NESTED_SQL" == 1 ]]; then
     --warmup "$WARMUP" --iterations "$ITERATIONS"
 fi
 
+if [[ "$UNNEST" == 1 ]]; then
+  "$PYTHON" benchmarks/scripts/run_unnest_benchmark.py \
+    --warmup "$WARMUP" --iterations "$ITERATIONS"
+fi
+
 if [[ "$OPTIMIZER" == 1 ]]; then
   "$PYTHON" benchmarks/scripts/run_optimizer_benchmark.py --data data/events.dremel --threads "$BENCH_THREADS" \
     --batch-size "$BATCH_SIZE" --warmup "$WARMUP" --iterations "$ITERATIONS"
@@ -277,6 +283,7 @@ if [[ "$SQL_V1" == 1 ]]; then REPORT_ARGS+=(--include sql); fi
 if [[ "$SCHEMA_SQL" == 1 ]]; then REPORT_ARGS+=(--include schema); fi
 if [[ "$NESTED_PARQUET" == 1 ]]; then REPORT_ARGS+=(--include nested); fi
 if [[ "$NESTED_SQL" == 1 ]]; then REPORT_ARGS+=(--include nested-sql); fi
+if [[ "$UNNEST" == 1 ]]; then REPORT_ARGS+=(--include unnest); fi
 if [[ "$OPTIMIZER" == 1 ]]; then REPORT_ARGS+=(--include optimizer); fi
 if [[ "$CONCURRENCY" == 1 ]]; then REPORT_ARGS+=(--include concurrency); fi
 if [[ "$PARQUET_CONCURRENCY" == 1 ]]; then

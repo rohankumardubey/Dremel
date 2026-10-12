@@ -51,6 +51,13 @@ pub struct JoinSpec {
     pub kind: JoinKind,
     pub table: TableRef,
     pub on: Option<Expr>,
+    pub unnest: Option<UnnestSpec>,
+}
+#[derive(Clone, Debug)]
+pub struct UnnestSpec {
+    pub path: String,
+    pub column: String,
+    pub ordinality: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OrderSpec {

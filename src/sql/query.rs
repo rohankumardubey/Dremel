@@ -138,7 +138,17 @@ impl Parser {
                 None
             };
             let Some(kind) = kind else { break };
-            let (table, derived_join) = self.relation_ref()?;
+            let lateral = self.word("lateral");
+            let (table, derived_join, unnest) = if self.peek() == &Token::Word("unnest".into()) {
+                let (table, spec) = self.unnest_ref()?;
+                (table, None, Some(spec))
+            } else {
+                if lateral {
+                    return Err("LATERAL is currently supported only for UNNEST".into());
+                }
+                let (table, derived) = self.relation_ref()?;
+                (table, derived, None)
+            };
             derived.extend(derived_join);
             let on = if kind == JoinKind::Cross {
                 None
@@ -146,7 +156,12 @@ impl Parser {
                 self.expect_word("on")?;
                 Some(self.expr(0)?)
             };
-            joins.push(JoinSpec { kind, table, on });
+            joins.push(JoinSpec {
+                kind,
+                table,
+                on,
+                unnest,
+            });
         }
         let filter = if self.word("where") {
             Some(self.expr(0)?)

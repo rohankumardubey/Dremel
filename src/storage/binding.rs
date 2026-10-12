@@ -7,7 +7,7 @@ use std::ops::{Deref, DerefMut};
 pub(crate) struct Bindings {
     aliases: HashMap<String, String>,
     columns: HashMap<String, HashMap<String, SqlType>>,
-    arrow_types: HashMap<String, DataType>,
+    arrow_types: HashMap<(String, String), DataType>,
 }
 
 impl Deref for Bindings {
@@ -61,7 +61,10 @@ impl Bindings {
             ]
             .into(),
             columns: [(name.into(), fields)].into(),
-            arrow_types,
+            arrow_types: arrow_types
+                .into_iter()
+                .map(|(path, kind)| ((name.into(), path), kind))
+                .collect(),
         })
     }
 
@@ -79,8 +82,29 @@ impl Bindings {
             .unwrap_or(SqlType::Unknown)
     }
 
-    pub(crate) fn arrow_type(&self, column: &str) -> Option<&DataType> {
-        self.arrow_types.get(column)
+    pub(crate) fn arrow_type(&self, table: &str, column: &str) -> Option<&DataType> {
+        self.arrow_types.get(&(table.into(), column.into()))
+    }
+
+    pub(crate) fn add_relation(
+        &mut self,
+        alias: &str,
+        fields: arrow::datatypes::Fields,
+    ) -> Result<(), String> {
+        if self.aliases.contains_key(alias) {
+            return Err(format!("duplicate table alias {alias}"));
+        }
+        let mut types = HashMap::new();
+        let mut arrow = HashMap::new();
+        schema_fields(&fields, "", &mut types, &mut arrow)?;
+        self.aliases.insert(alias.into(), alias.into());
+        self.columns.insert(alias.into(), types);
+        self.arrow_types.extend(
+            arrow
+                .into_iter()
+                .map(|(path, kind)| ((alias.into(), path), kind)),
+        );
+        Ok(())
     }
 }
 
@@ -183,6 +207,9 @@ pub(crate) fn table_columns(table: &str) -> &'static [&'static str] {
 }
 
 pub(crate) fn query_bindings(query: &Query) -> Result<Bindings, String> {
+    if query.joins.iter().any(|join| join.unnest.is_some()) {
+        return Err("UNNEST requires a named Arrow/Parquet table (--table)".into());
+    }
     let mut bindings = Bindings::builtin();
     for table in std::iter::once(&query.from).chain(query.joins.iter().map(|join| &join.table)) {
         if table_columns(&table.name).is_empty() {
@@ -230,10 +257,11 @@ pub(crate) fn resolve_column(
                     .split_once('.')
                     .filter(|(qualifier, _)| bindings.contains_key(*qualifier))
                     .map_or(prefix.as_str(), |(_, path)| path);
-                if bindings
-                    .arrow_type(unqualified)
-                    .is_some_and(|kind| arrow_sql_type(kind) == SqlType::List)
-                {
+                if bindings.values().any(|table| {
+                    bindings
+                        .arrow_type(table, unqualified)
+                        .is_some_and(|kind| arrow_sql_type(kind) == SqlType::List)
+                }) {
                     return Err(format!("{column}: LIST traversal requires UNNEST"));
                 }
             }

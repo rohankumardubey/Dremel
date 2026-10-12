@@ -102,10 +102,10 @@ pub(super) fn canonical_type(data_type: &DataType) -> Result<DataType, String> {
 pub(super) fn expression_type(expression: &Expr, bindings: &Bindings) -> Result<DataType, String> {
     match expression {
         Expr::Column(column) => {
-            let (_, path) = resolve_column(column, bindings)?;
+            let (table, path) = resolve_column(column, bindings)?;
             canonical_type(
                 bindings
-                    .arrow_type(&path)
+                    .arrow_type(&table, &path)
                     .ok_or("missing Arrow column type")?,
             )
         }

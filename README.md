@@ -96,7 +96,16 @@ paths and whole STRUCT/LIST projections are supported, including parent nulls:
   --sql "SELECT profile.city, profile.detail.zip, CARDINALITY(samples) FROM records"
 ```
 
-Joins, UNNEST, and streaming scans require further work for this mode. See
+Expand repeated fields while keeping their parent record:
+
+```bash
+./target/release/dremel query --data records.parquet --table records \
+  --sql "SELECT record_id, u.value.price, u.ordinality FROM records CROSS JOIN UNNEST(items) WITH ORDINALITY AS u"
+```
+
+Correlated `UNNEST` supports cross, inner, and left joins, chained lists, and
+one-based ordinality. Ordinary table joins and streaming scans still require
+further work for this mode. See
 [named-table SQL](docs/sql-support.md#named-table-sql) for supported types and
 the Rust API.
 
@@ -115,7 +124,7 @@ The output retains parent nulls, null lists, empty lists, and null elements.
 Omit `--output` to scan without exporting data; the command prints a JSON scan
 summary. See [nested Parquet scans](docs/nested-parquet.md) for the Rust API,
 row-group selection, metrics, and benchmarks. The `scan` command is a storage
-API; use `query --table` for nested SQL. Neither command performs UNNEST.
+API; use `query --table` for nested SQL and correlated UNNEST.
 
 ## Memory and result streaming
 
@@ -215,21 +224,21 @@ The reference CLI is `benchmarks/cpp/build/dremel-cpp`; it accepts the same
 ## Project status
 
 This is a single-node research engine with schema-driven named-table SQL and
-nested STRUCT/LIST values. It does not yet implement the paper's multi-level
-serving tree or repeated-field relational execution.
+nested STRUCT/LIST values and correlated repeated-field execution. It does not
+yet implement the paper's multi-level serving tree.
 The Rust storage boundary can read arbitrary Arrow IPC and Parquet schemas
 through `ColumnarTable`. Eager Arrow and Parquet queries and native DREMCOL1
 queries use typed columnar storage. Named-table queries derive column
 types from the Arrow schema. Built-in workloads still use specialized
-operators; a catalog for multiple user-defined tables and UNNEST execution
-are pending. Nested SQL runs on eager Arrow batches. The separate projected
+operators; a catalog for multiple user-defined tables is pending.
+Nested SQL and UNNEST run on eager Arrow batches. The separate projected
 Parquet scanner is not yet connected to SQL scan planning.
 There is a repetition/definition-level round-trip example, but it is not
 connected to the query engine. Distributed storage and exchange, fault
 tolerance, transactions, database wire protocols, and durable spill recovery
 are also outside the current scope.
 
-The next architectural steps are repeated-field SQL, multi-file datasets,
+The next architectural steps are a generic catalog, multi-file datasets,
 partitioned partial aggregation, and a coordinator-to-leaf execution protocol. Each step
 needs correctness and resource testing before a production-readiness claim
 would be justified.
