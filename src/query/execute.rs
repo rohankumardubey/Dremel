@@ -1,3 +1,4 @@
+use super::unnest::{self, ColumnAccess, Expansion, Position};
 use crate::execution::aggregate::{AggState, finish};
 use crate::relational::{
     aggregate_state, collect_aggregates, eval_group_with_columns, eval_with_columns, finalize_rows,
@@ -11,7 +12,7 @@ use crate::types::{
 use std::collections::HashMap;
 
 struct Group {
-    location: Option<(usize, usize)>,
+    location: Option<(usize, Position)>,
     states: Vec<AggState>,
 }
 
@@ -30,9 +31,26 @@ fn state_strings(states: &[AggState]) -> usize {
 pub(super) fn execute(
     query: &Query,
     table: &ColumnarTable,
-    paths: &HashMap<String, String>,
+    paths: &HashMap<String, ColumnAccess>,
+    unnests: &[Expansion],
 ) -> Result<Vec<Vec<Scalar>>, String> {
-    let batches = ValueBatch::from_table(table, paths)?;
+    let value_paths = paths
+        .iter()
+        .filter_map(|(name, access)| match access {
+            ColumnAccess::Value { path, .. } => Some((name.clone(), path.clone())),
+            ColumnAccess::Ordinality { .. } => None,
+        })
+        .collect();
+    let batches = ValueBatch::from_table(table, &value_paths)?;
+    let sources = crate::storage::list_sources(
+        table,
+        &unnests
+            .iter()
+            .map(|stage| stage.path.as_str())
+            .collect::<Vec<_>>(),
+    )?;
+    let mut position = Position::new(0, unnests.len());
+    account_query_memory(position.heap_bytes(), "UNNEST cursor")?;
     let aggregate = query.select.iter().any(|item| contains_agg(&item.expr))
         || query.having.as_ref().is_some_and(contains_agg)
         || !query.group_by.is_empty();
@@ -45,7 +63,7 @@ pub(super) fn execute(
         collect_aggregates(having, &mut expressions);
     }
     let templates: Vec<_> = expressions.iter().map(aggregate_state).collect();
-    let metadata_count = aggregate && query.filter.is_none() && query.group_by.is_empty()
+    let metadata_count = unnests.is_empty() && aggregate && query.filter.is_none() && query.group_by.is_empty()
         && expressions.iter().all(|expression| matches!(expression, Expr::Func(name, argument) if name == "count" && matches!(argument.as_ref(), Expr::Star)));
     let mut groups = HashMap::<Vec<ScalarKey>, Group>::new();
     let group_bytes =
@@ -75,77 +93,99 @@ pub(super) fn execute(
             if execution_cancelled() {
                 return Err("query cancelled during Arrow scan".into());
             }
-            let value = |column: &str| batch.scalar(column, row);
-            if query
-                .filter
-                .as_ref()
-                .is_some_and(|filter| !eval_with_columns(filter, &value).truthy())
-            {
-                continue;
-            }
-            if aggregate {
-                let key: Vec<_> = query
-                    .group_by
-                    .iter()
-                    .map(|column| scalar_group_key(value(column)))
-                    .collect();
-                if !groups.contains_key(&key) {
-                    let strings: usize = key
-                        .iter()
-                        .map(|value| match value {
-                            ScalarKey::Str(text) => text.capacity(),
-                            _ => 0,
-                        })
-                        .sum();
-                    account_query_memory(
-                        group_bytes + strings + key.len() * std::mem::size_of::<ScalarKey>(),
-                        "generic hash aggregation",
-                    )?;
-                }
-                let group = groups.entry(key).or_insert_with(|| Group {
-                    location: None,
-                    states: templates.clone(),
-                });
-                group.location = Some((batch_index, row));
-                let before = state_strings(&group.states);
-                for (state, expression) in group.states.iter_mut().zip(&expressions) {
-                    let Expr::Func(_, argument) = expression else {
-                        unreachable!()
-                    };
-                    update_scalar_aggregate(
-                        state,
-                        matches!(argument.as_ref(), Expr::Star),
-                        eval_with_columns(argument, &value),
-                    );
-                }
-                let after = state_strings(&group.states);
-                if after > before {
-                    account_query_memory(after - before, "aggregate string values")?;
-                } else if let Some(memory) = current_query_memory() {
-                    memory.release(before - after);
-                }
-            } else {
-                if query.limit == Some(0) {
-                    break 'scan;
-                }
-                let output: Vec<_> = query
-                    .select
-                    .iter()
-                    .map(|item| eval_with_columns(&item.expr, &value))
-                    .collect();
-                account_query_memory(
-                    crate::execution::row_bytes(&output),
-                    "result materialization",
-                )?;
-                rows.push(output);
-                if query.order_by.is_empty()
-                    && !query.distinct
-                    && query
-                        .limit
-                        .is_some_and(|limit| rows.len() >= limit.saturating_add(query.offset))
+            position.indices[0] = Some(row);
+            let mut consume = |position: &Position| -> Result<bool, String> {
+                let value = |column: &str| unnest::value(column, batch, paths, position);
+                if query
+                    .filter
+                    .as_ref()
+                    .is_some_and(|filter| !eval_with_columns(filter, &value).truthy())
                 {
-                    break 'scan;
+                    return Ok(true);
                 }
+                if aggregate {
+                    let key: Vec<_> = query
+                        .group_by
+                        .iter()
+                        .map(|column| scalar_group_key(value(column)))
+                        .collect();
+                    if !groups.contains_key(&key) {
+                        let strings: usize = key
+                            .iter()
+                            .map(|value| match value {
+                                ScalarKey::Str(text) => text.capacity(),
+                                _ => 0,
+                            })
+                            .sum();
+                        account_query_memory(
+                            group_bytes + strings + key.len() * std::mem::size_of::<ScalarKey>(),
+                            "generic hash aggregation",
+                        )?;
+                    }
+                    let group = groups.entry(key).or_insert_with(|| Group {
+                        location: None,
+                        states: templates.clone(),
+                    });
+                    if group.location.is_none() {
+                        account_query_memory(position.heap_bytes(), "aggregate row cursor")?;
+                        group.location = Some((batch_index, position.clone()));
+                    }
+                    let before = state_strings(&group.states);
+                    for (state, expression) in group.states.iter_mut().zip(&expressions) {
+                        let Expr::Func(_, argument) = expression else {
+                            unreachable!()
+                        };
+                        update_scalar_aggregate(
+                            state,
+                            matches!(argument.as_ref(), Expr::Star),
+                            eval_with_columns(argument, &value),
+                        );
+                    }
+                    let after = state_strings(&group.states);
+                    if after > before {
+                        account_query_memory(after - before, "aggregate string values")?;
+                    } else if let Some(memory) = current_query_memory() {
+                        memory.release(before - after);
+                    }
+                } else {
+                    if query.limit == Some(0) {
+                        return Ok(false);
+                    }
+                    let output: Vec<_> = query
+                        .select
+                        .iter()
+                        .map(|item| eval_with_columns(&item.expr, &value))
+                        .collect();
+                    account_query_memory(
+                        crate::execution::row_bytes(&output),
+                        "result materialization",
+                    )?;
+                    rows.push(output);
+                    if query.order_by.is_empty()
+                        && !query.distinct
+                        && query
+                            .limit
+                            .is_some_and(|limit| rows.len() >= limit.saturating_add(query.offset))
+                    {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            };
+            let keep_scanning = if unnests.is_empty() {
+                consume(&position)?
+            } else {
+                unnest::visit(
+                    unnests,
+                    &sources[batch_index],
+                    batch,
+                    paths,
+                    &mut position,
+                    &mut consume,
+                )?
+            };
+            if !keep_scanning {
+                break 'scan;
             }
         }
     }
@@ -153,9 +193,12 @@ pub(super) fn execute(
         for group in groups.into_values() {
             let values: Vec<_> = group.states.iter().map(finish).collect();
             let column = |name: &str| {
-                group.location.map_or(Scalar::Null, |(batch, row)| {
-                    batches[batch].scalar(name, row)
-                })
+                group
+                    .location
+                    .as_ref()
+                    .map_or(Scalar::Null, |(batch, position)| {
+                        unnest::value(name, &batches[*batch], paths, position)
+                    })
             };
             if query.having.as_ref().is_some_and(|having| {
                 !eval_group_with_columns(having, &expressions, &values, &column).truthy()

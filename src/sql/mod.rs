@@ -7,9 +7,10 @@ mod lexer;
 mod parser;
 mod plan;
 mod query;
+mod unnest;
 
 pub(crate) use analysis::{collect, contains_agg, contains_subquery, contains_window, is_agg};
 pub(crate) use ast::NamedQuery;
-pub use ast::{Expr, JoinKind, JoinSpec, OrderSpec, Query, SelectItem, TableRef};
+pub use ast::{Expr, JoinKind, JoinSpec, OrderSpec, Query, SelectItem, TableRef, UnnestSpec};
 pub(crate) use lexer::{Token, lex};
 pub(crate) use parser::Parser;

@@ -13,6 +13,7 @@ mod interoperable;
 mod native;
 mod nested_scan;
 mod primitive;
+mod value_paths;
 mod values;
 pub(crate) use binding::*;
 pub use columnar::ColumnarTable;
@@ -20,7 +21,9 @@ pub(crate) use dimension::DimensionTable;
 use event_columnar::EventColumnar;
 pub(crate) use interoperable::ParquetScanMetrics;
 pub use nested_scan::{ParquetScan, ParquetScanOptions, ParquetScanPlan};
+pub(crate) use value_paths::{list_sources, project_path};
 pub(crate) use values::ValueBatch;
+pub(crate) use values::list_range;
 
 #[derive(Clone, Default)]
 pub(crate) struct Dictionary {

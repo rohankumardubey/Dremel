@@ -18,10 +18,11 @@ pub(super) fn prepare(
         return Err("--table requires a SQL identifier".into());
     }
     let mut query = Parser::new(sql)?.parse()?;
-    if !query.joins.is_empty() || !query.ctes.is_empty() || query.union.is_some() {
+    if !query.ctes.is_empty() || query.union.is_some() {
         return Err("named-table queries currently support one table; joins, CTEs, and UNION require a catalog".into());
     }
-    let bindings = Bindings::from_schema(&query, &table_name, &schema)?;
+    let mut bindings = Bindings::from_schema(&query, &table_name, &schema)?;
+    let unnests = super::unnest::bind_expansions(&mut query, &mut bindings)?;
     let mut select = Vec::new();
     for item in query.select {
         if matches!(item.expr, Expr::Star) {
@@ -37,9 +38,17 @@ pub(super) fn prepare(
                     ));
                 }
                 select.push(SelectItem {
-                    expr: Expr::Column(name),
+                    expr: Expr::Column(format!("{}.{name}", query.from.alias)),
                     alias: None,
                 });
+            }
+            for stage in &unnests {
+                for name in std::iter::once(&stage.column).chain(stage.ordinality.iter()) {
+                    select.push(SelectItem {
+                        expr: Expr::Column(format!("{}.{name}", stage.alias)),
+                        alias: None,
+                    });
+                }
             }
         } else {
             select.push(item);
@@ -62,6 +71,7 @@ pub(super) fn prepare(
         collect_paths(having, &mut paths);
     }
     paths.extend(query.group_by.iter().cloned());
+    super::unnest::collect_join_paths(&query, &mut paths);
     query.columns = paths.into_iter().collect();
     for item in &query.select {
         validate(&item.expr, &bindings, false, None)?;
@@ -120,10 +130,29 @@ pub(super) fn prepare(
     let aggregate = query.select.iter().any(|item| contains_agg(&item.expr))
         || query.having.as_ref().is_some_and(contains_agg)
         || !query.group_by.is_empty();
+    let column_paths = query
+        .columns
+        .iter()
+        .map(|column| {
+            Ok((
+                column.clone(),
+                super::unnest::column_access(column, &bindings, &table_name, &unnests)?,
+            ))
+        })
+        .collect::<Result<_, String>>()?;
     query.physical = vec![format!(
         "ArrowScanExec(table={table_name};columns=[{}])",
-        query.columns.join(",")
+        super::unnest::scan_paths(&column_paths, &unnests).join(",")
     )];
+    for stage in &unnests {
+        query.physical.push(format!(
+            "CorrelatedUnnestExec(type={:?};alias={};source={};ordinality={};parent_copy=false)",
+            stage.kind,
+            stage.alias,
+            stage.path,
+            stage.ordinality.is_some(),
+        ));
+    }
     if query.filter.is_some() {
         query.physical.push("FilterExec".into());
     }
@@ -148,14 +177,11 @@ pub(super) fn prepare(
         query.physical.push("LimitExec".into());
     }
     Ok(ColumnarQuery {
-        column_paths: query
-            .columns
-            .iter()
-            .map(|column| Ok((column.clone(), resolve_column(column, &bindings)?.1)))
-            .collect::<Result<_, String>>()?,
+        column_paths,
         query,
         input_schema: schema,
         output_schema: Arc::new(Schema::new(fields)),
+        unnests,
     })
 }
 
@@ -183,7 +209,7 @@ pub(super) fn output_type(kind: SqlType) -> Result<DataType, String> {
     })
 }
 
-fn validate(
+pub(super) fn validate(
     expression: &Expr,
     bindings: &Bindings,
     inside_aggregate: bool,
@@ -205,7 +231,11 @@ fn validate(
             if bindings.column_type(&table, &name) == SqlType::Unknown {
                 return Err(format!("column {column} has an unsupported SQL type"));
             }
-            canonical_type(bindings.arrow_type(&name).ok_or("missing Arrow type")?)?;
+            canonical_type(
+                bindings
+                    .arrow_type(&table, &name)
+                    .ok_or("missing Arrow type")?,
+            )?;
         }
         Expr::Func(name, argument) => validate_function(
             name,

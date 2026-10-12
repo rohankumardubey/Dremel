@@ -9,6 +9,7 @@ mod nested;
 mod nested_tests;
 #[cfg(test)]
 mod tests;
+mod unnest;
 
 use crate::execution::row_json;
 use crate::storage::ColumnarTable;
@@ -21,7 +22,8 @@ pub struct ColumnarQuery {
     query: crate::sql::Query,
     input_schema: SchemaRef,
     output_schema: SchemaRef,
-    column_paths: std::collections::HashMap<String, String>,
+    column_paths: std::collections::HashMap<String, unnest::ColumnAccess>,
+    unnests: Vec<unnest::Expansion>,
 }
 
 /// SQL result fields and rows in the engine's canonical scalar representation.
@@ -68,7 +70,7 @@ impl ColumnarQuery {
             return Err("query input schema changed; prepare the query again".into());
         }
         let (rows, _) = with_query_memory(limit_mb, || {
-            execute::execute(&self.query, table, &self.column_paths)
+            execute::execute(&self.query, table, &self.column_paths, &self.unnests)
         });
         Ok(QueryResult {
             schema: self.output_schema.clone(),
@@ -92,7 +94,7 @@ pub fn run_columnar_query(
     }
     let started = Instant::now();
     let (rows, memory) = with_query_memory(options.query_memory_limit_mb, || {
-        execute::execute(&query.query, &table, &query.column_paths)
+        execute::execute(&query.query, &table, &query.column_paths, &query.unnests)
     });
     let rows = rows?;
     let returned = rows.len();
@@ -109,7 +111,11 @@ pub fn run_columnar_query(
         eprintln!(
             "{{\"rows_scanned\":{},\"rows_returned\":{returned},\"columns_scanned\":{},\"elapsed_ns\":{},\"query_memory_peak_bytes\":{}}}",
             table.row_count(),
-            query.query.columns.len(),
+            unnest::scan_paths(&query.column_paths, &query.unnests)
+                .iter()
+                .map(|path| path.split(['.', '[']).next().expect("nonempty access path"))
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
             started.elapsed().as_nanos(),
             memory.peak_accounted_bytes()
         );
