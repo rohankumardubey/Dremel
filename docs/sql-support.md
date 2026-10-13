@@ -147,10 +147,9 @@ null. `COUNT(container)` counts non-null containers, including empty lists.
 `CARDINALITY(list)` returns its element count, including null elements; it
 returns null for a null list. `CASE` and `COALESCE` accept container values
 only when non-null branches have identical normalized Arrow field layouts.
-Container comparisons, casts, MIN/MAX/SUM/AVG, DISTINCT, grouping, and explicit
-container sort keys are rejected. Ordering by a projected primitive key is
-allowed alongside container projections. Container JSON is used only as a
-deterministic tie-break for equal explicit sort keys, not as SQL ordering.
+Containers support structural comparisons, IN/NOT IN, BETWEEN, NULLIF,
+MIN/MAX, DISTINCT, grouping, HAVING, and explicit sort keys. Container casts,
+arithmetic, SUM/AVG, and string functions remain unsupported.
 
 The Rust `Scalar` API adds `Struct(Vec<(String, Scalar)>)` and
 `List(Vec<Scalar>)`. The result schema retains container shapes and field names,
@@ -186,6 +185,66 @@ input formats, batch sizes, row groups, and primitive widths. Container
 queries have no flat timing control. These measurements are not a Rust/C++
 language comparison. The suite is enabled by default by the full runner;
 set `NESTED_SQL=0` to disable it. Results include an interactive HTML report.
+
+### Structural value operators
+
+STRUCT values compare in schema field order; lists compare lexicographically
+by element. The first differing child determines ordering, and a shorter list
+sorts before a longer list with the same prefix. Comparison uses typed values,
+not JSON text: `[2]` sorts before `[10]`. Container field names and normalized
+leaf types must match for comparison; field name case and nullability do not
+change values. Primitive widths and list offset widths normalize without
+changing semantics. No implicit numeric widening occurs inside containers.
+
+An outer NULL operand makes an ordinary comparison unknown, just as for a
+scalar. Inside a valid container, null children are structural values: two
+null children compare equal, and a null child sorts before a non-null child.
+This inner ordering is fixed and does not change with the outer ORDER BY
+NULLS FIRST/LAST setting. A null list, `[]`, and `[NULL]` remain distinct;
+a null struct remains distinct from a valid all-null struct.
+
+Grouping and DISTINCT use recursive typed keys, not serialized JSON. Floating
+children canonicalize signed zero and NaN payloads; all NaNs compare equal
+and sort after positive infinity inside containers. MIN/MAX skip outer NULLs,
+retain the complete typed winning value, and use the same structural order.
+These are the engine's documented container semantics, not a claim that every
+SQL database orders nested values identically.
+
+```sql
+SELECT profile, COUNT(*) AS n, MIN(samples), MAX(samples)
+FROM records
+GROUP BY profile
+HAVING profile = profile AND COUNT(*) > 1
+ORDER BY profile NULLS LAST;
+```
+
+The same comparisons work in correlated UNNEST ON predicates, including
+joins between STRUCT or LIST elements. Null outer elements do not match with
+`=`, while valid containers containing null children can match. LEFT JOIN
+preservation still happens before WHERE filtering. Independent table joins
+remain unsupported without a catalog.
+
+Operators read only referenced paths; the engine does not flatten the whole
+parent record. Evaluating a referenced container constructs its typed value,
+and grouping, extrema, sorting, and output may retain those values. Query
+workspace estimates include recursive keys, retained extrema, DISTINCT keys,
+and sort workspace; transient expression allocations are not fully bounded.
+EXPLAIN reports `NestedValueExec(keys=typed;order=lexicographic;...)` for
+container-valued access. Execution remains eager, serial, and materialized.
+
+```bash
+.venv/bin/python benchmarks/scripts/run_nested_operators_benchmark.py --warmup 3 --iterations 20
+```
+
+The suite checks 22 queries in both Arrow and Parquet formats against an
+independent structural oracle over official PyArrow values. Selected scalar
+results also use SQLite and prepared Rust controls over precomputed,
+order-preserving integer ranks. Rank encoding and loading are outside timing;
+this isolates nested evaluation overhead, not end-to-end flattening costs or
+a Rust/C++ winner. Both formats use 4096-row batches/row groups. The runner
+enables this suite by default; set `NESTED_OPERATORS=0` to disable it. JSON
+results and an interactive HTML report are written under
+`results/nested-operators/`.
 
 ## UNNEST
 

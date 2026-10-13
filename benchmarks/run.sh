@@ -21,6 +21,7 @@ SCHEMA_SQL="${SCHEMA_SQL:-1}"
 NESTED_PARQUET="${NESTED_PARQUET:-1}"
 NESTED_SQL="${NESTED_SQL:-1}"
 UNNEST="${UNNEST:-1}"
+NESTED_OPERATORS="${NESTED_OPERATORS:-1}"
 OPTIMIZER="${OPTIMIZER:-1}"
 CONCURRENCY="${CONCURRENCY:-1}"
 PARQUET_CONCURRENCY="${PARQUET_CONCURRENCY:-1}"
@@ -58,6 +59,7 @@ if ! "$PYTHON" -c 'import pyarrow; assert pyarrow.__version__ == "25.0.1"' 2>/de
 fi
 
 mkdir -p results
+"$PYTHON" benchmarks/scripts/test_benchmark_report.py
 "$PYTHON" benchmarks/scripts/create_workload.py
 "$PYTHON" benchmarks/scripts/create_extended_workload.py
 "$PYTHON" benchmarks/scripts/create_sql_v1_workload.py
@@ -187,6 +189,11 @@ if [[ "$UNNEST" == 1 ]]; then
     --warmup "$WARMUP" --iterations "$ITERATIONS"
 fi
 
+if [[ "$NESTED_OPERATORS" == 1 ]]; then
+  "$PYTHON" benchmarks/scripts/run_nested_operators_benchmark.py \
+    --warmup "$WARMUP" --iterations "$ITERATIONS"
+fi
+
 if [[ "$OPTIMIZER" == 1 ]]; then
   "$PYTHON" benchmarks/scripts/run_optimizer_benchmark.py --data data/events.dremel --threads "$BENCH_THREADS" \
     --batch-size "$BATCH_SIZE" --warmup "$WARMUP" --iterations "$ITERATIONS"
@@ -284,6 +291,7 @@ if [[ "$SCHEMA_SQL" == 1 ]]; then REPORT_ARGS+=(--include schema); fi
 if [[ "$NESTED_PARQUET" == 1 ]]; then REPORT_ARGS+=(--include nested); fi
 if [[ "$NESTED_SQL" == 1 ]]; then REPORT_ARGS+=(--include nested-sql); fi
 if [[ "$UNNEST" == 1 ]]; then REPORT_ARGS+=(--include unnest); fi
+if [[ "$NESTED_OPERATORS" == 1 ]]; then REPORT_ARGS+=(--include nested-operators); fi
 if [[ "$OPTIMIZER" == 1 ]]; then REPORT_ARGS+=(--include optimizer); fi
 if [[ "$CONCURRENCY" == 1 ]]; then REPORT_ARGS+=(--include concurrency); fi
 if [[ "$PARQUET_CONCURRENCY" == 1 ]]; then

@@ -8,7 +8,7 @@ use arrow::datatypes::{DataType, Field, Int32Type, Schema};
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 
-fn fixture() -> ColumnarTable {
+pub(super) fn fixture() -> ColumnarTable {
     let detail = StructArray::new(
         vec![
             Field::new("Zip", DataType::Int32, false),
@@ -250,14 +250,8 @@ fn rejects_unsupported_nested_operations_at_prepare_time() {
     for sql in [
         "SELECT profile.missing FROM records",
         "SELECT items.price FROM records",
-        "SELECT profile FROM records ORDER BY profile",
-        "SELECT DISTINCT samples FROM records",
-        "SELECT profile, COUNT(*) FROM records GROUP BY profile",
-        "SELECT MIN(profile) FROM records",
         "SELECT CAST(samples AS VARCHAR) FROM records",
-        "SELECT samples = samples FROM records",
         "SELECT CONCAT(profile) FROM records",
-        "SELECT NULLIF(profile, profile) FROM records",
         "SELECT CARDINALITY(profile) FROM records",
         "SELECT CASE WHEN id > 0 THEN profile ELSE samples END FROM records",
         "SELECT COALESCE(profile, profile.detail) FROM records",

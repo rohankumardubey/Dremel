@@ -109,7 +109,10 @@ pub(super) fn expression_type(expression: &Expr, bindings: &Bindings) -> Result<
                     .ok_or("missing Arrow column type")?,
             )
         }
-        Expr::Func(name, argument) if name == "coalesce" => expression_type(argument, bindings),
+        Expr::Func(name, argument) if ["coalesce", "min", "max"].contains(&name.as_str()) => {
+            expression_type(argument, bindings)
+        }
+        Expr::Call(name, arguments) if name == "nullif" => expression_type(&arguments[0], bindings),
         Expr::Call(name, arguments) if name == "coalesce" => merge_types(
             arguments
                 .iter()
@@ -159,7 +162,7 @@ fn merge_types(
 
 pub(super) fn reject_nested(expression: &Expr, bindings: &Bindings) -> Result<(), String> {
     if is_nested(infer_type(expression, bindings)?) {
-        Err("operator requires scalar operands; nested comparison, casting, grouping, and ordering are unsupported".into())
+        Err("operator requires scalar operands; container arithmetic, string functions, and casting are unsupported".into())
     } else {
         Ok(())
     }

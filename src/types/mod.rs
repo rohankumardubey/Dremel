@@ -1,4 +1,6 @@
+mod keys;
 mod memory;
+pub(crate) use keys::canonical_float_bits;
 
 pub(crate) use memory::*;
 
@@ -67,7 +69,8 @@ pub(crate) enum ScalarKey {
     Float(u64),
     Bool(bool),
     Str(String),
-    Nested(String),
+    Struct(Vec<ScalarKey>),
+    List(Vec<ScalarKey>),
 }
 
 pub(crate) struct ExecutionControl {

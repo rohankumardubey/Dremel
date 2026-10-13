@@ -49,15 +49,9 @@ pub(crate) fn compare_output_rows(
         Scalar::List(_) => 7,
     };
     for (left, right) in left.iter().zip(right) {
-        let ordering = scalar_rank(left).cmp(&scalar_rank(right)).then_with(|| {
-            cmp(left, right).unwrap_or_else(|| {
-                if matches!(left, Scalar::Struct(_) | Scalar::List(_)) {
-                    left.json().cmp(&right.json())
-                } else {
-                    Ordering::Equal
-                }
-            })
-        });
+        let ordering = scalar_rank(left)
+            .cmp(&scalar_rank(right))
+            .then_with(|| cmp(left, right).unwrap_or(Ordering::Equal));
         if ordering != Ordering::Equal {
             return ordering;
         }

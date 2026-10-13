@@ -75,12 +75,6 @@ pub(super) fn prepare(
     query.columns = paths.into_iter().collect();
     for item in &query.select {
         validate(&item.expr, &bindings, false, None)?;
-        if query.distinct {
-            reject_nested(&item.expr, &bindings)?;
-        }
-    }
-    for group in &query.group_by {
-        reject_nested(&Expr::Column(group.clone()), &bindings)?;
     }
     if let Some(filter) = &query.filter {
         if contains_agg(filter) {
@@ -109,11 +103,6 @@ pub(super) fn prepare(
                 order.key
             ));
         }
-        let item = query.select.iter().find(|item| {
-            item.alias.as_ref() == Some(&order.key)
-                || matches!(&item.expr, Expr::Column(column) if column == &order.key || column.rsplit('.').next() == Some(order.key.as_str()))
-        }).expect("one matching order expression");
-        reject_nested(&item.expr, &bindings)?;
     }
     let fields = query
         .select
@@ -175,6 +164,14 @@ pub(super) fn prepare(
     }
     if query.limit.is_some() || query.offset > 0 {
         query.physical.push("LimitExec".into());
+    }
+    if query.columns.iter().any(|column| {
+        infer_type(&Expr::Column(column.clone()), &bindings).is_ok_and(super::nested::is_nested)
+    }) {
+        query.physical.push(
+            "NestedValueExec(keys=typed;order=lexicographic;inner_nulls=first;parent_copy=false)"
+                .into(),
+        );
     }
     Ok(ColumnarQuery {
         column_paths,
@@ -263,6 +260,13 @@ pub(super) fn validate(
             child(value)?;
         }
         Expr::IsNull(value, _) => child(value)?,
+        Expr::Binary(operator, left, right)
+            if ["=", "!=", "<", "<=", ">", ">="].contains(&operator.as_str()) =>
+        {
+            super::operators::comparable(left, right, bindings)?;
+            child(left)?;
+            child(right)?;
+        }
         Expr::Binary(_, left, right) | Expr::Like(left, right, _) => {
             reject_nested(left, bindings)?;
             reject_nested(right, bindings)?;
@@ -278,17 +282,15 @@ pub(super) fn validate(
             child(fallback)?;
         }
         Expr::InList(value, candidates, _) => {
-            reject_nested(value, bindings)?;
             child(value)?;
             for candidate in candidates {
-                reject_nested(candidate, bindings)?;
+                super::operators::comparable(value, candidate, bindings)?;
                 child(candidate)?;
             }
         }
         Expr::Between(value, low, high, _) => {
-            for value in [value, low, high] {
-                reject_nested(value, bindings)?;
-            }
+            super::operators::comparable(value, low, bindings)?;
+            super::operators::comparable(value, high, bindings)?;
             child(value)?;
             child(low)?;
             child(high)?;
@@ -328,7 +330,7 @@ fn validate_function(
         return Err(format!("invalid argument count for {name}"));
     }
     for argument in arguments {
-        if !["count", "coalesce", "cardinality"].contains(&name) {
+        if !["count", "min", "max", "nullif", "coalesce", "cardinality"].contains(&name) {
             reject_nested(argument, bindings)?;
         }
         if matches!(argument, Expr::Star) && name != "count" {
@@ -348,6 +350,9 @@ fn validate_function(
             ),
             bindings,
         )?;
+    }
+    if name == "nullif" {
+        super::operators::comparable(arguments[0], arguments[1], bindings)?;
     }
     if ["sum", "avg", "abs"].contains(&name) && !numeric_type(kind) && kind != SqlType::Null {
         return Err(format!("{name} requires a numeric argument"));
