@@ -1,4 +1,5 @@
 pub(crate) mod aggregate;
+mod nested_compare;
 pub(crate) mod scalar;
 mod sort_spill;
 mod spill;

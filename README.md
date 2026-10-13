@@ -109,6 +109,12 @@ further work for this mode. See
 [named-table SQL](docs/sql-support.md#named-table-sql) for supported types and
 the Rust API.
 
+Whole STRUCT/LIST values also support structural comparisons, grouping,
+DISTINCT, MIN/MAX, and lexicographic ordering, including nested element
+comparisons in UNNEST joins. These operations use typed keys rather than JSON
+strings. See [structural value operators](docs/sql-support.md#structural-value-operators)
+for null semantics and the dedicated correctness/performance suite.
+
 ## Scan nested Parquet
 
 Read nested STRUCT/LIST data without flattening records or decoding unrelated

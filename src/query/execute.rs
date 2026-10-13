@@ -16,13 +16,11 @@ struct Group {
     states: Vec<AggState>,
 }
 
-fn state_strings(states: &[AggState]) -> usize {
+fn state_heap_bytes(states: &[AggState]) -> usize {
     states
         .iter()
         .map(|state| match state {
-            AggState::Min(Some(Scalar::Str(text))) | AggState::Max(Some(Scalar::Str(text))) => {
-                text.capacity()
-            }
+            AggState::Min(Some(value)) | AggState::Max(Some(value)) => value.heap_bytes(),
             _ => 0,
         })
         .sum()
@@ -110,15 +108,9 @@ pub(super) fn execute(
                         .map(|column| scalar_group_key(value(column)))
                         .collect();
                     if !groups.contains_key(&key) {
-                        let strings: usize = key
-                            .iter()
-                            .map(|value| match value {
-                                ScalarKey::Str(text) => text.capacity(),
-                                _ => 0,
-                            })
-                            .sum();
+                        let heap_bytes: usize = key.iter().map(ScalarKey::heap_bytes).sum();
                         account_query_memory(
-                            group_bytes + strings + key.len() * std::mem::size_of::<ScalarKey>(),
+                            group_bytes + heap_bytes + key.len() * std::mem::size_of::<ScalarKey>(),
                             "generic hash aggregation",
                         )?;
                     }
@@ -130,7 +122,7 @@ pub(super) fn execute(
                         account_query_memory(position.heap_bytes(), "aggregate row cursor")?;
                         group.location = Some((batch_index, position.clone()));
                     }
-                    let before = state_strings(&group.states);
+                    let before = state_heap_bytes(&group.states);
                     for (state, expression) in group.states.iter_mut().zip(&expressions) {
                         let Expr::Func(_, argument) = expression else {
                             unreachable!()
@@ -141,9 +133,9 @@ pub(super) fn execute(
                             eval_with_columns(argument, &value),
                         );
                     }
-                    let after = state_strings(&group.states);
+                    let after = state_heap_bytes(&group.states);
                     if after > before {
-                        account_query_memory(after - before, "aggregate string values")?;
+                        account_query_memory(after - before, "aggregate retained values")?;
                     } else if let Some(memory) = current_query_memory() {
                         memory.release(before - after);
                     }
@@ -217,6 +209,22 @@ pub(super) fn execute(
             rows.push(output);
         }
     }
+    if execution_cancelled() {
+        return Err("query cancelled before result finalization".into());
+    }
+    let sort_bytes = if query.order_by.is_empty() {
+        0
+    } else {
+        rows.len()
+            .saturating_mul(std::mem::size_of::<Vec<Scalar>>())
+    };
+    account_query_memory(sort_bytes, "result sorting workspace")?;
     finalize_rows(query, &mut rows);
+    if let Some(memory) = current_query_memory() {
+        memory.release(sort_bytes);
+    }
+    if execution_cancelled() {
+        return Err("query cancelled during result finalization".into());
+    }
     Ok(rows)
 }

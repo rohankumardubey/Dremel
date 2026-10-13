@@ -164,8 +164,8 @@ def main() -> int:
         finally:
             for server in reversed(servers):
                 server.close()
-        for sql in ["SELECT samples.price FROM records", "SELECT profile = profile FROM records",
-                    "SELECT DISTINCT samples FROM records", "SELECT MIN(profile) FROM records",
+        for sql in ["SELECT samples.price FROM records", "SELECT profile = profile.detail FROM records",
+                    "SELECT SUM(samples) FROM records", "SELECT AVG(profile) FROM records",
                     "SELECT COALESCE(profile, profile.detail) FROM records"]:
             result = subprocess.run([args.rust, "query", "--data", str(path), "--table", "records", "--sql", sql], capture_output=True, text=True)
             assert result.returncode != 0 and not result.stdout, (sql, result)

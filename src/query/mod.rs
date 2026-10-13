@@ -8,6 +8,9 @@ mod nested;
 #[cfg(test)]
 mod nested_tests;
 #[cfg(test)]
+mod operator_tests;
+mod operators;
+#[cfg(test)]
 mod tests;
 mod unnest;
 

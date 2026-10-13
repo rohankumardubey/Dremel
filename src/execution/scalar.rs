@@ -17,6 +17,9 @@ pub(crate) fn cmp(a: &Scalar, b: &Scalar) -> Option<Ordering> {
         (Scalar::Float(x), Scalar::Decimal(y)) => x.partial_cmp(&(*y as f64 / 100.0)),
         (Scalar::Str(x), Scalar::Str(y)) => Some(x.cmp(y)),
         (Scalar::Bool(x), Scalar::Bool(y)) => Some(x.cmp(y)),
+        (Scalar::Struct(_), Scalar::Struct(_)) | (Scalar::List(_), Scalar::List(_)) => {
+            super::nested_compare::compare(a, b)
+        }
         _ => None,
     }
 }

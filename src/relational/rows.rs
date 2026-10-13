@@ -76,10 +76,10 @@ pub(crate) fn scalar_hash_key(value: Scalar) -> Option<ScalarKey> {
         Scalar::Null => None,
         Scalar::Int(value) => Some(ScalarKey::Int(value)),
         Scalar::Decimal(value) => Some(ScalarKey::Decimal(value)),
-        Scalar::Float(value) => Some(ScalarKey::Float(value.to_bits())),
+        Scalar::Float(value) => Some(ScalarKey::Float(canonical_float_bits(value))),
         Scalar::Bool(value) => Some(ScalarKey::Bool(value)),
         Scalar::Str(value) => Some(ScalarKey::Str(value)),
-        value @ (Scalar::Struct(_) | Scalar::List(_)) => Some(ScalarKey::Nested(value.json())),
+        value @ (Scalar::Struct(_) | Scalar::List(_)) => Some(ScalarKey::from_scalar(&value)),
     }
 }
 
@@ -88,15 +88,7 @@ pub(crate) fn scalar_group_key(value: Scalar) -> ScalarKey {
 }
 
 pub(crate) fn scalar_group_key_ref(value: &Scalar) -> ScalarKey {
-    match value {
-        Scalar::Null => ScalarKey::Null,
-        Scalar::Int(value) => ScalarKey::Int(*value),
-        Scalar::Decimal(value) => ScalarKey::Decimal(*value),
-        Scalar::Float(value) => ScalarKey::Float(value.to_bits()),
-        Scalar::Bool(value) => ScalarKey::Bool(*value),
-        Scalar::Str(value) => ScalarKey::Str(value.clone()),
-        value @ (Scalar::Struct(_) | Scalar::List(_)) => ScalarKey::Nested(value.json()),
-    }
+    ScalarKey::from_scalar(value)
 }
 
 pub(crate) fn relation_group_key(
